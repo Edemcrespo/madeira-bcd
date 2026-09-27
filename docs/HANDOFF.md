@@ -302,10 +302,13 @@ launch logs that shader's bytecode once (harmless, ~8 log lines); delete the
 file in the Wine prefix to stop it.
 
 ### Open issues, roughly in priority order (updated overnight 2026-09-27/28)
-Waiting for the owner's device test of build 199 (all of 196-199 in one):
-C++ exception crash after a save (196), shader cache kept across builds (197),
-MSC flags for the slight artefacts (198), DXIL tessellation / water (199).
-1. **Verify 199 on the device**: `[pc2fh]` at start-up and no VCRUNTIME140_1
+Waiting for the owner's device test of build 201, which carries everything
+from the night: C++ exception crash after a save (196), shader cache kept
+across builds (197), MSC flags for the slight artefacts (198), DXIL
+tessellation / water and one mkdir per cache bucket (199), compute-shader
+dumps opt-in with the old ones deleted and the DXBC cache of earlier builds
+removed (201; run 200 was cancelled by 201's dispatch).
+1. **Verify 201 on the device**: `[pc2fh]` at start-up and no VCRUNTIME140_1
    crash after saving; `shader cache ON ... identity 'madeira_d3d12 bc1
    converter <hex>'` and mostly hits on the second launch; `[madeira-ir] MSC
    4.0.1 compatibility: position invariance on, strict NaN/Inf on, ...`;
@@ -602,3 +605,13 @@ N drawn` in the ml1050 lines. If water scenes misbehave (GPU fault, hang),
 `dxil-tess = 0` in madeira.cfg restores the placeholders. The workflow now
 FAILS when madeira_d3d12.dll does not build (it used to ship upstream's old
 tracked DLL and stay green).
+
+### Build 201: housekeeping on the phone's storage
+* ml931 wrote the first 400 compute shaders of every launch to
+  `C:\madeira-cs\cs_<pipeline pointer>_<size>.dxil`; the pointer differs per
+  run, so every launch added up to ~16 MB that nothing removed. Now opt-in
+  (`cs-dump = 1`); the old dumps are deleted in the background (log: `removed
+  N old compute-shader dumps`).
+* The unix DXBC cache (`Documents/shadercache/*.mdsc`) got a fresh set per
+  build and never lost the old ones; entries of earlier builds are removed
+  once per build (log: `DXBC shader cache: removed N entries`).
