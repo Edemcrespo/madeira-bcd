@@ -143,7 +143,7 @@ static int g_census_on;   /* ml899: one frame at presents 1500,1700,...,2800 */
  * vanish before its draw, in depth, in the G-buffer, or only in lighting" can
  * then be answered from a Mac (build/tools/capture-to-png.py). */
 static int g_capture_on; static unsigned g_capture_left; static UINT64 g_capture_frame;
-struct mad_capbuf { obj_handle_t buf; void *cpu; UINT64 bytes; UINT w, h, bpr, pf, dxgi; unsigned enc, idx; char kind[8]; char name[40]; char what[64]; };
+struct mad_capbuf { obj_handle_t buf; void *cpu; UINT64 bytes; UINT w, h, bpr, pf, dxgi; unsigned enc, idx; char kind[8]; char name[40]; char what[64]; char alias[256]; };
 /* madeira-bcd: CAP contact sheets. Attachments and compute UAV outputs of the
  * captured frame become numbered thumbnails on PNG sheets (Documents/capture/
  * f<frame>_sheetNN.png), converted on the phone, so no Mac is needed to look at
@@ -536,6 +536,8 @@ struct mad_resource {
     const IID *iid;
     const char *name;
     struct mad_memheap *placed_heap;   /* ml1145: set when the storage IS the heap's, at the placement offset */
+    UINT64 placed_off, placed_size;    /* madeira-bcd: where in that heap, and how much Metal took */
+    unsigned serial;                   /* madeira-bcd: creation number, names a resource in capture / alias logs */
     void *own_mem;                     /* ml1154: our VirtualAlloc'd storage behind a CPU-visible buffer */
     unsigned track_seq;                /* ml1157: creation order in the address index (newest alias wins) */
     obj_handle_t buffer;
@@ -768,6 +770,10 @@ static void mad_format_info(DXGI_FORMAT f, UINT *bytes, UINT *block);
 static UINT64 mad_res_row_bytes(const struct mad_resource *r);
 static int mad_map_texture_format(DXGI_FORMAT f, D3D12_RESOURCE_FLAGS flags, enum WMTPixelFormat *out, int *is_depth);
 static int mad_texinfo_from_desc(const D3D12_RESOURCE_DESC *desc, struct WMTTextureInfo *ti, enum WMTPixelFormat *pf, int *is_depth);   /* ml1145 */
+static void mad_alias_desc(const struct mad_resource *r, char *o, size_t cap);   /* madeira-bcd */
+static void mad_res_short(const struct mad_resource *r, char *o, size_t cap);
+struct mad_memheap;
+static void mad_pl_del(struct mad_memheap *h, struct mad_resource *r);
 struct mad_device;
 static void mad_mheap_reclaim(struct mad_device *d, int all);   /* ml1148 */
 struct mad_rootsig;
@@ -1778,6 +1784,10 @@ static void mad_capture_one(struct mad_exec *e, obj_handle_t benc, struct mad_re
     else if (r->is_depth) { bytes = r->tex_pf == WMTPixelFormatDepth16Unorm ? 2 : 4; options = r->has_stencil ? 1 : 0; }
     else { mad_format_info(r->desc.Format, &bytes, &block); if (!bytes || (block != 1 && block != 4)) return; }
     if (!w || !h) return;
+    /* madeira-bcd: a block-compressed texture behind a UAV (a BC1 target written
+     * through an R32G32 alias) has 4x4-block rows; the contact sheets read
+     * texels, so only the targeted "tex" inputs keep them (raw files). */
+    if (block != 1 && strcmp(kind, "tex")) return;
     /* ml1141: block-compressed textures (sampled inputs, never targets) copy out
      * as whole 4x4 blocks: bytes is per BLOCK there. */
     bpr = (UINT64)((w + block - 1) / block) * bytes; total = bpr * ((h + block - 1) / block);
@@ -1818,6 +1828,7 @@ static void mad_capture_one(struct mad_exec *e, obj_handle_t benc, struct mad_re
     memset(cb, 0, sizeof *cb);
     cb->buf = buf; cb->cpu = bi.memory.ptr; cb->bytes = total; cb->w = w; cb->h = h; cb->bpr = (UINT)bpr;
     if (what) snprintf(cb->what, sizeof cb->what, "%s", what);
+    mad_alias_desc(r, cb->alias, sizeof cb->alias);   /* madeira-bcd: which placed resources share its memory */
     cb->pf = options == 2 ? (UINT)WMTPixelFormatStencil8 : (r->is_depth ? (UINT)WMTPixelFormatDepth32Float : (UINT)r->tex_pf);
     cb->dxgi = (UINT)r->desc.Format; cb->enc = seq; cb->idx = idx;
     snprintf(cb->kind, sizeof cb->kind, "%s", kind);
@@ -1974,6 +1985,14 @@ static int mad_texel_rgb(const unsigned char *t, UINT pf, UINT bpp, float dlo, f
     for (k = 0; k < 3; k++) o[k] = mad_tm(f[k]);
     return 0;
 }
+static UINT mad_pf_texel_bytes(UINT pf) {   /* bytes mad_texel_rgb reads for a format */
+    if (pf >= 10 && pf <= 14) return 1;
+    if ((pf >= 20 && pf <= 25) || (pf >= 30 && pf <= 34) || pf == 250) return 2;
+    if ((pf >= 53 && pf <= 55) || (pf >= 60 && pf <= 65) || (pf >= 70 && pf <= 94) || pf == 252 || pf == 260) return 4;
+    if (pf >= 103 && pf <= 115) return 8;
+    if (pf >= 123 && pf <= 125) return 16;
+    return 1;
+}
 static const UINT16 g_digits[10] = { 075557, 026227, 071747, 071717, 055711, 074717, 074757, 071111, 075757, 075717 };   /* 3x5, rows of 3 bits */
 static void mad_sheet_number(unsigned char *img, unsigned x0, unsigned y0, unsigned num) {
     char txt[12]; unsigned n = (unsigned)snprintf(txt, sizeof txt, "%u", num), i, x, y, sc = 3;
@@ -2013,12 +2032,22 @@ static void mad_sheet_flush(UINT64 frame) {
 }
 /* One captured image -> the next cell of the current sheet, plus an index line. */
 static void mad_sheet_add(const struct mad_capbuf *c, UINT64 frame) {
-    UINT bpp, tw, th, x, y, cx, cy, ox, oy; float sc, dlo = 1e30f, dhi = -1e30f; UINT64 nan = 0; char line[320];
+    UINT bpp, tw, th, x, y, cx, cy, ox, oy; float sc, dlo = 1e30f, dhi = -1e30f; UINT64 nan = 0; char line[640];
     const unsigned char *base = c->cpu; int isdepth = c->pf == 250 || c->pf == 252 || c->pf == 260;
     if (!c->w || !c->h || !c->cpu) return;
     if (g_sheet_thumbs >= MAD_SH_MAX_THUMBS) { g_sheet_dropped++; return; }
+    if (c->bpr < c->w || (UINT64)c->bpr * c->h > c->bytes) {   /* never read past the copy (a block-compressed or odd layout) */
+        d3d12_log("[capture-sheet] skipped enc#%05u %s%u %ux%u pf%u: %llu bytes, bpr %u do not cover it\n", c->enc, c->kind, c->idx,
+                  c->w, c->h, c->pf, (unsigned long long)c->bytes, c->bpr);
+        return;
+    }
     if (!g_sheet) { g_sheet = malloc((size_t)MAD_SH_W * MAD_SH_H * 3); if (!g_sheet) return; memset(g_sheet, 40, (size_t)MAD_SH_W * MAD_SH_H * 3); }
     bpp = c->bpr / c->w; if (!bpp) bpp = 1;
+    if (bpp < mad_pf_texel_bytes(c->pf)) {
+        d3d12_log("[capture-sheet] skipped enc#%05u %s%u %ux%u pf%u: %u bytes per texel, the format needs %u\n", c->enc, c->kind, c->idx,
+                  c->w, c->h, c->pf, bpp, mad_pf_texel_bytes(c->pf));
+        return;
+    }
     sc = fminf((float)MAD_SH_CW / (float)c->w, (float)MAD_SH_CH / (float)c->h);
     tw = (UINT)(c->w * sc); th = (UINT)(c->h * sc); if (!tw) tw = 1; if (!th) th = 1;
     if (isdepth || c->pf == 55 || c->pf == 25 || c->pf == 65 || c->pf == 105 || c->pf == 115 || c->pf == 125 || c->pf == 92) {
@@ -2051,6 +2080,7 @@ static void mad_sheet_add(const struct mad_capbuf *c, UINT64 frame) {
              c->what[0] ? c->what : "-");
     if (nan) snprintf(line + strlen(line), sizeof line - strlen(line), " NaN/Inf=%llu", (unsigned long long)nan);
     if (isdepth && dhi >= dlo) snprintf(line + strlen(line), sizeof line - strlen(line), " depth %.5f..%.5f", dlo, dhi);
+    if (c->alias[0]) snprintf(line + strlen(line), sizeof line - strlen(line), " | %s", c->alias);
     d3d12_log("[capture-sheet] %s\n", line);
     strcat(line, "\n"); mad_sheet_index_add(line);
     if (++g_sheet_cells == MAD_SH_COLS * MAD_SH_ROWS) mad_sheet_flush(frame);
@@ -2274,7 +2304,44 @@ static void mad_capture_dispatch_outputs(struct mad_exec *e, const struct mad_cm
     struct mad_device *d = e->q->device; const struct mad_rootsig *rs = e->crs;
     struct mad_resource *outs[4]; struct mad_rtvp vs[4]; unsigned nout = 0, i, k, ri, u, seq;
     obj_handle_t benc; char what[64];
-    if (!rs || !e->cpso || g_sheet_thumbs + g_ncapbufs >= MAD_SH_MAX_THUMBS) return;
+    static LONG bsaid;
+    if (!rs || !e->cpso) return;
+    for (i = 0; i < rs->nparams && i < MAD_ROOT_PARAM_MAX; i++) {   /* madeira-bcd: placed UAV buffers this dispatch can write */
+        const struct madeira_ir_root_param *p = &rs->params[i]; UINT64 va = e->croot[i];
+        if (p->type == MADEIRA_IR_PARAM_UAV && va) {
+            UINT64 boff = 0; struct mad_resource *br = mad_resolve_address(d, va, &boff); char al[256];
+            if (br && br->placed_heap && InterlockedIncrement(&bsaid) <= 600) {
+                mad_alias_desc(br, al, sizeof al);
+                d3d12_log("[capture-uavbuf] enc#%u cs %016llx root u%u writes +%llu of %s\n", e->cenc_seq,
+                          (unsigned long long)e->cpso->cs_hash, p->shader_register, (unsigned long long)boff, al);
+            }
+        } else if (p->type == MADEIRA_IR_PARAM_TABLE && e->srv && e->srv->cpu && va >= e->srv->gpu_address &&
+                   va < e->srv->gpu_address + (UINT64)e->srv->count * sizeof(struct mad_descriptor)) {
+            unsigned base = (unsigned)((va - e->srv->gpu_address) / sizeof(struct mad_descriptor)), run = 0;
+            for (ri = 0; ri < p->num_ranges; ri++) {
+                const struct madeira_ir_root_range *rg; unsigned nd, off;
+                if (p->first_range + ri >= rs->nranges) break;
+                rg = &rs->ranges[p->first_range + ri];
+                nd = rg->num_descriptors;
+                off = rg->table_offset != 0xffffffffu ? rg->table_offset : run;
+                if (nd == 0xffffffffu) break;
+                run = off + nd;
+                if (rg->range_type != MADEIRA_IR_RANGE_UAV || nd > 16) continue;
+                for (k = 0; k < nd && base + off + k < e->srv->count; k++) {
+                    const struct mad_descriptor *de = &e->srv->cpu[base + off + k];
+                    UINT64 boff = 0; struct mad_resource *br; char al[256];
+                    if (!de->gpu_va || (de->texture_view_id && !(de->metadata >> 63))) continue;
+                    br = mad_resolve_address(d, de->gpu_va, &boff);
+                    if (br && br->placed_heap && InterlockedIncrement(&bsaid) <= 600) {
+                        mad_alias_desc(br, al, sizeof al);
+                        d3d12_log("[capture-uavbuf] enc#%u cs %016llx u%u writes +%llu of %s\n", e->cenc_seq,
+                                  (unsigned long long)e->cpso->cs_hash, rg->base_register + k, (unsigned long long)boff, al);
+                    }
+                }
+            }
+        }
+    }
+    if (g_sheet_thumbs + g_ncapbufs >= MAD_SH_MAX_THUMBS) return;
     for (i = 0; i < rs->nparams && i < MAD_ROOT_PARAM_MAX && nout < 4; i++) {
         const struct madeira_ir_root_param *p = &rs->params[i]; UINT64 va = e->croot[i];
         unsigned base, run = 0;
@@ -4993,6 +5060,32 @@ static void exec_dispatch(struct mad_exec *e, const struct mad_cmd *c) {
     }
 }
 
+/* madeira-bcd: during a CAP frame, every clear and copy with its target's
+ * identity and alias report -- clear-only passes are not captured as images,
+ * and a copy into memory shared with a live target is a corruption source. */
+static void mad_capture_log_op(const struct mad_cmd *c) {
+    static LONG said; const struct mad_resource *r = NULL; char al[256], extra[160];
+    extra[0] = 0;
+    switch (c->kind) {
+    case MC_CLEAR_RT: r = c->u.clear.res;
+        snprintf(extra, sizeof extra, "clear RT (%g %g %g %g) mip %u slice %u", c->u.clear.rgba[0], c->u.clear.rgba[1], c->u.clear.rgba[2],
+                 c->u.clear.rgba[3], c->u.clear.v.level, c->u.clear.v.slice); break;
+    case MC_CLEAR_DS: r = c->u.clear.res;
+        snprintf(extra, sizeof extra, "clear DS flags %u depth %g stencil %u", c->u.clear.flags, c->u.clear.depth, c->u.clear.stencil); break;
+    case MC_COPY_BB: r = c->u.bb.dst; snprintf(extra, sizeof extra, "copy buffer +%llu len %llu -> +%llu", (unsigned long long)c->u.bb.soff,
+                                               (unsigned long long)c->u.bb.len, (unsigned long long)c->u.bb.doff); break;
+    case MC_COPY_B2T: r = c->u.bt.tex; snprintf(extra, sizeof extra, "copy buffer -> texture mip %u slice %u %ux%u at %u,%u", c->u.bt.level, c->u.bt.slice,
+                                                c->u.bt.w, c->u.bt.h, c->u.bt.x, c->u.bt.y); break;
+    case MC_COPY_T2T: r = c->u.tt.dst; snprintf(extra, sizeof extra, "copy texture r#%u -> mip %u slice %u %ux%u at %u,%u",
+                                                c->u.tt.src ? c->u.tt.src->serial : 0, c->u.tt.dlevel, c->u.tt.dslice, c->u.tt.w, c->u.tt.h, c->u.tt.dx, c->u.tt.dy); break;
+    case MC_FILL_BB: r = c->u.fill.res; snprintf(extra, sizeof extra, "fill buffer +%llu len %llu", (unsigned long long)c->u.fill.off, (unsigned long long)c->u.fill.len); break;
+    case MC_FILL_TEX: r = c->u.filltex.res; snprintf(extra, sizeof extra, "UAV texture clear mip %u", c->u.filltex.level); break;
+    default: return;
+    }
+    if (!r || InterlockedIncrement(&said) > 1500) return;
+    mad_alias_desc(r, al, sizeof al);
+    d3d12_log("[capture-op] list#%u enc#%u %s -> %s\n", g_list_seq, g_enc_seq, extra, al);
+}
 static void mad_exec_list(struct mad_queue *q, struct mad_list *l, obj_handle_t cb) {
     g_list_seq++;
     struct mad_exec e;
@@ -5009,6 +5102,7 @@ static void mad_exec_list(struct mad_queue *q, struct mad_list *l, obj_handle_t 
     for (i = 0; i < l->ncmds; i++) {
         const struct mad_cmd *c = &l->cmds[i];
         e.cur = i;   /* ml1137 */
+        if (g_capture_on) mad_capture_log_op(c);   /* madeira-bcd */
         switch (c->kind) {
         case MC_PSO: if (c->u.pso && c->u.pso->is_compute) e.cpso = c->u.pso; else e.pso = c->u.pso; break;
         case MC_CROOTSIG: e.crs = c->u.rootsig; break;
@@ -7419,7 +7513,7 @@ static ULONG STDMETHODCALLTYPE res_Release(ID3D12Resource *This) {
         { unsigned k; for (k = 0; k < r->nview_old; k++) free(r->view_old[k]); free(r->tview); free(r->xview); }
         if (r->buffer) NSObject_release(r->buffer);
         if (r->texture && !r->borrowed) NSObject_release(r->texture);
-        if (r->placed_heap) ID3D12Heap_Release((ID3D12Heap *)r->placed_heap);   /* ml1145 */
+        if (r->placed_heap) { mad_pl_del(r->placed_heap, r); ID3D12Heap_Release((ID3D12Heap *)r->placed_heap); }   /* ml1145 */
         if (r->own_mem) {   /* ml1154: the GPU may still read it; free after its serial (reclaimed with the ml1148 list) */
             struct mad_device *md = r->owner; int queued = 0;
             InterlockedExchangeAdd64(&g_upload_swap_bytes, -(LONG64)((r->size + 0xffff) & ~(UINT64)0xffff)); InterlockedDecrement(&g_upload_swap_n);
@@ -7600,7 +7694,50 @@ struct mad_memheap {
     struct mad_device *device;
     D3D12_HEAP_DESC desc;
     obj_handle_t mtl;   /* ml1145: the Metal placement heap, or 0 */
+    SRWLOCK pl_lock; struct mad_resource **pl; unsigned npl, pl_cap; unsigned serial;   /* madeira-bcd: what is placed in it */
 };
+static LONG g_res_serial, g_heap_serial;
+/* madeira-bcd: placed-resource registry per heap, for the alias report. */
+static void mad_pl_add(struct mad_memheap *h, struct mad_resource *r) {
+    AcquireSRWLockExclusive(&h->pl_lock);
+    if (mad_grow((void **)&h->pl, &h->pl_cap, h->npl + 1, sizeof *h->pl)) h->pl[h->npl++] = r;
+    ReleaseSRWLockExclusive(&h->pl_lock);
+}
+static void mad_pl_del(struct mad_memheap *h, struct mad_resource *r) {
+    unsigned i;
+    AcquireSRWLockExclusive(&h->pl_lock);
+    for (i = 0; i < h->npl; i++) if (h->pl[i] == r) { h->pl[i] = h->pl[--h->npl]; break; }
+    ReleaseSRWLockExclusive(&h->pl_lock);
+}
+static void mad_res_short(const struct mad_resource *r, char *o, size_t cap) {
+    if (r->desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER)
+        snprintf(o, cap, "r#%u buf %llu", r->serial, (unsigned long long)r->desc.Width);
+    else
+        snprintf(o, cap, "r#%u tex %llux%u dx%u f%#x", r->serial, (unsigned long long)r->desc.Width, r->desc.Height,
+                 (unsigned)r->desc.Format, (unsigned)r->desc.Flags);
+}
+/* "heapN +off..end, overlaps: <resource> +off..end; ..." for a placed resource. */
+static void mad_alias_desc(const struct mad_resource *r, char *o, size_t cap) {
+    struct mad_memheap *h = r->placed_heap; unsigned i, n = 0, shown = 0; size_t k;
+    o[0] = 0;
+    if (!h) { snprintf(o, cap, "r#%u own memory", r->serial); return; }
+    k = (size_t)snprintf(o, cap, "r#%u heap%u(%lluK) +%llu..%llu", r->serial, h->serial, (unsigned long long)(h->desc.SizeInBytes >> 10),
+                         (unsigned long long)r->placed_off, (unsigned long long)(r->placed_off + r->placed_size));
+    AcquireSRWLockShared(&h->pl_lock);
+    for (i = 0; i < h->npl; i++) {
+        const struct mad_resource *q = h->pl[i]; char t[80];
+        if (q == r || q->placed_off >= r->placed_off + r->placed_size || r->placed_off >= q->placed_off + q->placed_size) continue;
+        n++;
+        if (shown < 4 && k + 100 < cap) {
+            mad_res_short(q, t, sizeof t);
+            k += (size_t)snprintf(o + k, cap - k, "%s%s +%llu..%llu", shown ? "; " : ", OVERLAPS: ", t,
+                                  (unsigned long long)q->placed_off, (unsigned long long)(q->placed_off + q->placed_size));
+            shown++;
+        }
+    }
+    ReleaseSRWLockShared(&h->pl_lock);
+    if (n > shown && k + 24 < cap) snprintf(o + k, cap - k, " (+%u more)", n - shown);
+}
 static LONG g_placed_in_heap, g_placed_fallback;
 static void mad_placed_fallback(const struct mad_memheap *h, const D3D12_RESOURCE_DESC *desc, UINT64 off, UINT64 msz, UINT64 mal) {
     LONG n = InterlockedIncrement(&g_placed_fallback);
@@ -7671,6 +7808,7 @@ static HRESULT mad_create_resource_at(struct mad_device *d, D3D12_HEAP_TYPE heap
     r = calloc(1, sizeof *r);
     if (!r) return E_OUTOFMEMORY;
     r->vtbl = &g_res_vtbl; r->refs = 1; r->iid = &IID_ID3D12Resource; r->name = "Resource";
+    r->serial = (unsigned)InterlockedIncrement(&g_res_serial);   /* madeira-bcd */
     r->size = desc->Width;
     r->heap = heap_type;
     r->desc = *desc;
@@ -7686,7 +7824,7 @@ static HRESULT mad_create_resource_at(struct mad_device *d, D3D12_HEAP_TYPE heap
             MTLDevice_heapTextureSizeAndAlign(d->mtl_device, &ti, &psz, &pal);
             if (psz && pal && !(poff % pal) && poff + psz <= ph->desc.SizeInBytes)
                 r->texture = MTLHeap_newTextureAtOffset(ph->mtl, &ti, poff);
-            if (r->texture) { r->placed_heap = ph; ID3D12Heap_AddRef((ID3D12Heap *)ph); InterlockedIncrement(&g_placed_in_heap); }
+            if (r->texture) { r->placed_heap = ph; r->placed_off = poff; r->placed_size = psz; mad_pl_add(ph, r); ID3D12Heap_AddRef((ID3D12Heap *)ph); InterlockedIncrement(&g_placed_in_heap); }
             else mad_placed_fallback(ph, desc, poff, psz, pal);
         }
         if (!r->texture && !(desc->Flags & (D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL | D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS))
@@ -7751,7 +7889,7 @@ static HRESULT mad_create_resource_at(struct mad_device *d, D3D12_HEAP_TYPE heap
             MTLDevice_heapBufferSizeAndAlign(d->mtl_device, info.length, info.options, &psz, &pal);
             if (psz && pal && !(poff % pal) && poff + psz <= ph->desc.SizeInBytes)
                 r->buffer = MTLHeap_newBufferAtOffset(ph->mtl, &info, poff);
-            if (r->buffer) { r->placed_heap = ph; ID3D12Heap_AddRef((ID3D12Heap *)ph); InterlockedIncrement(&g_placed_in_heap); }
+            if (r->buffer) { r->placed_heap = ph; r->placed_off = poff; r->placed_size = psz; mad_pl_add(ph, r); ID3D12Heap_AddRef((ID3D12Heap *)ph); InterlockedIncrement(&g_placed_in_heap); }
             else { mad_placed_fallback(ph, desc, poff, psz, pal); info.memory.ptr = NULL; info.gpu_address = 0; }
         }
         /* ml1154: a large CPU-visible buffer gets storage WE allocate, handed to
@@ -7858,6 +7996,7 @@ static ULONG STDMETHODCALLTYPE memheap_Release(ID3D12Heap *This) {
             if (!queued) { mad_unresident(hd, h->mtl); NSObject_release(h->mtl); }
             mad_mheap_reclaim(hd, 0);
         }
+        free(h->pl);   /* madeira-bcd: placed registry (every placed resource is gone by now) */
         free(o);
     }
     return (ULONG)n;
@@ -7891,6 +8030,7 @@ static HRESULT STDMETHODCALLTYPE device_CreateHeap(ID3D12Device *This, const D3D
     h = calloc(1, sizeof *h);
     if (!h) return E_OUTOFMEMORY;
     h->vtbl = &g_memheap_vtbl; h->refs = 1; h->iid = &IID_ID3D12Heap; h->name = "Heap";
+    h->serial = (unsigned)InterlockedIncrement(&g_heap_serial);   /* madeira-bcd */
     h->device = (struct mad_device *)This;
     h->desc = *desc;
     {   /* ml1145 */
@@ -7924,6 +8064,15 @@ static HRESULT STDMETHODCALLTYPE device_CreatePlacedResource(ID3D12Device *This,
     (void)state; (void)clear;
     if (!h || !desc || !out) { if (said++ < 8) d3d12_log("[madeira-d3d12] CreatePlacedResource: null heap/desc/out\n"); return E_INVALIDARG; }
     hr = mad_create_resource_at((struct mad_device *)This, h->desc.Properties.Type, desc, riid, out, h, offset);   /* ml1145 */
+    if (SUCCEEDED(hr) && *out) {   /* madeira-bcd: every placement, so a capture's alias report can be followed back */
+        static LONG psaid; const struct mad_resource *pr = (const struct mad_resource *)*out; char t[80];
+        if (InterlockedIncrement(&psaid) <= 6000) {
+            mad_res_short(pr, t, sizeof t);
+            d3d12_log("[placed] %s in heap%u (%llu KB, flags %#x) at +%llu, Metal size %llu%s\n", t, h->serial,
+                      (unsigned long long)(h->desc.SizeInBytes >> 10), (unsigned)h->desc.Flags, (unsigned long long)offset,
+                      (unsigned long long)pr->placed_size, pr->placed_heap ? "" : " (NOT in the heap: standalone)");
+        }
+    }
     /* ml895: every placement inside a TRANSIENT heap (4 MB aligned, NOT_ZEROED)
      * with the list sequence, so a heap's occupancy can be replayed offline.
      * The RenderThread fault behind every menu crash is UE's transient

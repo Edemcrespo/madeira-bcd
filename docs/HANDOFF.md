@@ -451,3 +451,31 @@ If it is a `cs <hash>` thumbnail, that dispatch produced them: next step is
 `capture-cs` / the fault-shader machinery on that hash (dump its DXIL with
 `tools/dxil-disasm.py`). Build 189 also carries build 188's C++ throw repair.
 
+### Build 190 capture result (log 2026-09-27 21:15, main menu, 800x600)
+Contact sheets work (283 thumbnails, 15 sheets). Findings:
+* The main depth-stencil (800x600 D32S8, "DepthTarget") is clean after the
+  G-buffer passes (#249, enc#179408, depth 0..0.057) and has **14336 NaN
+  texels in a regular grid of small squares** at the next pass (#252,
+  enc#179423 `PsMain`, which does not write depth: `w0`). The stencil plane
+  (#253) shows the same grid plus garbage blocks = the green block pattern.
+  The black squares in `PsMain`'s output (#251) sit exactly on that grid.
+  Between the two passes only compute dispatches run (cs_main 100x75x1,
+  13x10x1, 1x1x1, 11 indirect, 1x16x16), none with a bounded texture UAV.
+* The previous frame's HDR image (#148, RGBA16F, probably TAA history)
+  carries the same NaN squares, so they also feed back frame to frame.
+* The 5th G-buffer target (RG16F, dx34, likely velocity) is NaN/Inf over the
+  whole sky (#167/#174/#202); its clear is not visible (clear-only passes
+  are not captured).
+* Hypothesis: memory aliasing. DEFAULT heaps are Metal placement heaps
+  (ml1145, `heap-backing = 1`); GoT uses many RT/DS-only heaps (flags 0x84).
+  A resource placed over the depth memory and written by one of those
+  dispatches (or a copy) would corrupt it in a grid, since Metal's tiled
+  layouts differ by format. Build 191 adds the alias report to prove or
+  refute it: look at the `| r#N heapH +a..b, OVERLAPS: ...` tail of the
+  depth's `[capture-sheet]` lines, then `[capture-uavbuf]` / `[capture-op]`
+  for a writer of an overlapping resource. If depth overlaps nothing, the
+  NaN depth is a second DepthTarget (compare r# of #249 and #252).
+* The second CAP of build 190 hung the game: thumbnailing a BC1 texture
+  (captured as a UAV target) read past its copy while holding the capture
+  lock. Fixed in 191 (BC skipped, reads bounds-checked).
+

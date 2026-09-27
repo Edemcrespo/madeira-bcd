@@ -250,6 +250,16 @@ already did.
   the budget; at most 480 thumbnails. `madeira.cfg`: `capture-uav = 0` drops
   compute outputs, `capture-raw = 1` also writes the raw files for
   `build/tools/capture-to-png.py`. Replaces the Mac-only raw workflow.
+- Alias report for captures (`madeira_d3d12.c`, `mad_pl_*`, `mad_alias_desc`,
+  `mad_capture_log_op`): every resource gets a creation number (`r#N`), every
+  heap one (`heapN`), and each DEFAULT heap keeps the list of resources placed
+  in it with offset and Metal size. `[placed]` logs each placement; every
+  contact-sheet line ends with the resource's number, heap range and the live
+  resources overlapping it; during a CAP frame `[capture-op]` logs every clear
+  and copy with its target, and `[capture-uavbuf]` every placed buffer a
+  dispatch can write. Block-compressed textures are no longer thumbnailed and
+  every thumbnail read is bounds-checked (a BC1 UAV target read past its copy
+  and hung the second CAP of build 190).
 - C++ throw repair (`build/ntdll-unix/thread_ios.c`, `NtRaiseException`): a
   64-bit C++ exception (0xE06D7363, 4 parameters) whose ThrowInfo pointer is a
   JIT-pool alias is mapped back to the PE image and gets that image's base as
