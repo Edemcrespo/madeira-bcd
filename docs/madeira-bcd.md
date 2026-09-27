@@ -293,6 +293,14 @@ already did.
   so once that band filled it got STATUS_NO_MEMORY (Ghost of Tsushima: 1 MB,
   then the game stopped itself). The band above the windows is now tried
   before relaxing or failing (`[wow-window] ... placed above them`).
+- Compute-shader dumps are opt-in (`madeira_d3d12.c` `mad_cs_dump_on`,
+  madeira.cfg `cs-dump = 1`): ml931 wrote the first 400 compute shaders of
+  every launch to `C:\madeira-cs\cs_<pipeline pointer>_<size>.dxil`, and the
+  pointer changes from run to run, so each launch added up to 400 files
+  (~16 MB) that nothing removed. With the switch off the old dumps are deleted
+  in the background at the first compute pipeline (`removed N old
+  compute-shader dumps`). Faulting shaders are still kept by hash
+  (`fault-shaders.txt`, `fault_<hash>.dxil`).
 - CAP contact sheets (`research/madeira-d3d12/src/pe/madeira_d3d12.c`,
   `mad_sheet_*`, `mad_capture_drain`, `mad_capture_dispatch_outputs`): the
   overlay's CAP button now turns every render-pass attachment of the captured
