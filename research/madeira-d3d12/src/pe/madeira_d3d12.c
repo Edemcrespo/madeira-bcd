@@ -143,7 +143,14 @@ static int g_census_on;   /* ml899: one frame at presents 1500,1700,...,2800 */
  * vanish before its draw, in depth, in the G-buffer, or only in lighting" can
  * then be answered from a Mac (build/tools/capture-to-png.py). */
 static int g_capture_on; static unsigned g_capture_left; static UINT64 g_capture_frame;
-struct mad_capbuf { obj_handle_t buf; void *cpu; UINT64 bytes; UINT w, h, bpr, pf, dxgi; unsigned enc, idx; char kind[8]; char name[40]; };
+struct mad_capbuf { obj_handle_t buf; void *cpu; UINT64 bytes; UINT w, h, bpr, pf, dxgi; unsigned enc, idx; char kind[8]; char name[40]; char what[64]; };
+/* madeira-bcd: CAP contact sheets. Attachments and compute UAV outputs of the
+ * captured frame become numbered thumbnails on PNG sheets (Documents/capture/
+ * f<frame>_sheetNN.png), converted on the phone, so no Mac is needed to look at
+ * them; NaN/Inf texels are painted magenta and counted. g_cap_lock guards the
+ * capture list (queues can replay on different threads). */
+#define MAD_SH_MAX_THUMBS 480
+static SRWLOCK g_cap_lock = SRWLOCK_INIT; static int g_cap_uav = 1, g_cap_raw; static unsigned g_cap_skipped, g_sheet_thumbs;
 static struct mad_capbuf *g_capbufs; static unsigned g_ncapbufs, g_capbufs_cap; static UINT64 g_cap_bytes;
 #define MAD_CAPTURE_BUDGET (384ull << 20)
 static int g_barrier_render = -1;   /* ml1098: madeira.cfg barrier-render = 1 closes render passes at barriers too */
@@ -1377,7 +1384,7 @@ struct mad_exec {
     struct mad_pso *diag_pso[6]; unsigned diag_npso; int diag_more;   /* pipelines the open render pass drew with */
 };
 static void mad_capture_pass(struct mad_exec *e, struct mad_resource **rt, unsigned nrt, const struct mad_rtvp *rtp,
-                             struct mad_resource *depth, const struct mad_rtvp *dp, unsigned seq);
+                             struct mad_resource *depth, const struct mad_rtvp *dp, unsigned seq, unsigned draws);
 static void mad_mip_dims(const struct mad_resource *r, UINT level, UINT *w, UINT *h, UINT *d);
 
 /* ml1088: OCCLUSION QUERIES.
@@ -1756,12 +1763,12 @@ static void exec_end(struct mad_exec *e) {
     }
     if (e->benc) { MTLCommandEncoder_endEncoding(e->benc); e->benc = 0; }
     if (e->cenc) { MTLCommandEncoder_endEncoding(e->cenc); e->cenc = 0; }
-    if (cdraws && g_capture_on) mad_capture_pass(e, crt, cn, crtp, cdepth, &cdp, cseq);   /* ml1098: after the pass, before anything else */
+    if (cdraws && g_capture_on) mad_capture_pass(e, crt, cn, crtp, cdepth, &cdp, cseq, cdraws);   /* ml1098: after the pass, before anything else */
 }
 
 /* ml1098: one attachment -> one shared buffer, one file later. */
 static void mad_capture_one(struct mad_exec *e, obj_handle_t benc, struct mad_resource *r, const struct mad_rtvp *v,
-                            unsigned seq, unsigned idx, const char *kind, UINT options) {
+                            unsigned seq, unsigned idx, const char *kind, UINT options, const char *what) {
     UINT w = 0, h = 0, d = 0, bytes = 0, block = 1; UINT64 bpr, total; obj_handle_t buf;
     struct WMTBufferInfo bi; struct wmtcmd_blit_copy_from_texture_to_buffer k; struct mad_capbuf *cb;
     static unsigned said_budget;
@@ -1786,62 +1793,315 @@ static void mad_capture_one(struct mad_exec *e, obj_handle_t benc, struct mad_re
             return;
         }
     }
+    AcquireSRWLockExclusive(&g_cap_lock);   /* madeira-bcd: held until the record is appended */
+    if (strcmp(kind, "tex") && g_sheet_thumbs + g_ncapbufs >= MAD_SH_MAX_THUMBS) {   /* the sheets are full: do not copy for nothing */
+        g_cap_skipped++; ReleaseSRWLockExclusive(&g_cap_lock); return;
+    }
     if (g_cap_bytes + total > MAD_CAPTURE_BUDGET) {
+        g_cap_skipped++;
+        ReleaseSRWLockExclusive(&g_cap_lock);
         if (!said_budget++) d3d12_log("[capture] budget of %llu MB reached at enc#%u; later targets of this frame are not captured\n",
                                       (unsigned long long)(MAD_CAPTURE_BUDGET >> 20), seq);
         return;
     }
     memset(&bi, 0, sizeof bi); bi.length = total; bi.options = WMTResourceStorageModeShared;
     buf = MTLDevice_newBuffer(e->q->device->mtl_device, &bi);
-    if (!buf || !bi.memory.ptr) { if (buf) NSObject_release(buf); return; }
+    if (!buf || !bi.memory.ptr) { if (buf) NSObject_release(buf); ReleaseSRWLockExclusive(&g_cap_lock); return; }
     memset(&k, 0, sizeof k);
     k.type = WMTBlitCommandCopyFromTextureToBuffer;
     k.src = r->texture; k.slice = v->slice; k.level = v->level;
     k.size.width = w; k.size.height = h; k.size.depth = 1;
     k.dst = buf; k.offset = 0; k.bytes_per_row = (UINT32)bpr; k.bytes_per_image = (UINT32)total; k.options = options;
     MTLBlitCommandEncoder_encodeCommands(benc, (const struct wmtcmd_base *)&k);
-    if (!mad_grow((void **)&g_capbufs, &g_capbufs_cap, g_ncapbufs + 1, sizeof *g_capbufs)) { NSObject_release(buf); return; }
+    if (!mad_grow((void **)&g_capbufs, &g_capbufs_cap, g_ncapbufs + 1, sizeof *g_capbufs)) { NSObject_release(buf); ReleaseSRWLockExclusive(&g_cap_lock); return; }
     cb = &g_capbufs[g_ncapbufs++];
     memset(cb, 0, sizeof *cb);
     cb->buf = buf; cb->cpu = bi.memory.ptr; cb->bytes = total; cb->w = w; cb->h = h; cb->bpr = (UINT)bpr;
+    if (what) snprintf(cb->what, sizeof cb->what, "%s", what);
     cb->pf = options == 2 ? (UINT)WMTPixelFormatStencil8 : (r->is_depth ? (UINT)WMTPixelFormatDepth32Float : (UINT)r->tex_pf);
     cb->dxgi = (UINT)r->desc.Format; cb->enc = seq; cb->idx = idx;
     snprintf(cb->kind, sizeof cb->kind, "%s", kind);
     { const char *n = r->name ? r->name : "res"; unsigned i; for (i = 0; i < sizeof cb->name - 1 && n[i]; i++) cb->name[i] = isalnum((unsigned char)n[i]) ? n[i] : '_'; cb->name[i] = 0; }
     g_cap_bytes += total;
+    ReleaseSRWLockExclusive(&g_cap_lock);
 }
 static void mad_capture_pass(struct mad_exec *e, struct mad_resource **rt, unsigned nrt, const struct mad_rtvp *rtp,
-                             struct mad_resource *depth, const struct mad_rtvp *dp, unsigned seq) {
-    obj_handle_t benc = MTLCommandBuffer_blitCommandEncoder(e->cb); unsigned i;
+                             struct mad_resource *depth, const struct mad_rtvp *dp, unsigned seq, unsigned draws) {
+    obj_handle_t benc = MTLCommandBuffer_blitCommandEncoder(e->cb); unsigned i; char what[64];
     if (!benc) return;
     g_enc_seq++;
     exec_fence_blit(e, benc, 0);
-    for (i = 0; i < nrt && i < 8; i++) mad_capture_one(e, benc, rt[i], &rtp[i], seq, i, "rt", 0);
+    snprintf(what, sizeof what, "pass, %u draws, last ps %s", draws, e->pso && e->pso->ps_name[0] ? e->pso->ps_name : "-");
+    for (i = 0; i < nrt && i < 8; i++) mad_capture_one(e, benc, rt[i], &rtp[i], seq, i, "rt", 0, what);
     if (depth) {
-        mad_capture_one(e, benc, depth, dp, seq, 8, "depth", 0);
-        if (depth->has_stencil) mad_capture_one(e, benc, depth, dp, seq, 9, "stencil", 2);
+        mad_capture_one(e, benc, depth, dp, seq, 8, "depth", 0, what);
+        if (depth->has_stencil) mad_capture_one(e, benc, depth, dp, seq, 9, "stencil", 2, what);
     }
     exec_fence_blit(e, benc, 1);
     MTLCommandEncoder_endEncoding(benc);
 }
 static void mad_device_flush_all(struct mad_device *d);
-static void mad_capture_finish(struct mad_device *d, UINT64 frame) {
-    unsigned i, ok = 0; UINT64 mb = g_cap_bytes >> 20;
-    mad_device_flush_all(d);
-    if (d->gpu_event) MTLSharedEvent_waitUntilSignaledValue(d->gpu_event, (UINT64)d->gpu_serial_committed, 10000);
-    for (i = 0; i < g_ncapbufs; i++) {
-        struct mad_capbuf *c = &g_capbufs[i]; struct madeira_ctl_args a;
+/* madeira-bcd: CAP contact sheets (see g_cap_lock). */
+#define MAD_SH_COLS 4
+#define MAD_SH_ROWS 5
+#define MAD_SH_CW 320
+#define MAD_SH_CH 180
+#define MAD_SH_GAP 4
+#define MAD_SH_W (MAD_SH_COLS * (MAD_SH_CW + MAD_SH_GAP) + MAD_SH_GAP)
+#define MAD_SH_H (MAD_SH_ROWS * (MAD_SH_CH + MAD_SH_GAP) + MAD_SH_GAP)
+static unsigned char *g_sheet; static unsigned g_sheet_cells, g_sheet_no, g_sheet_files, g_sheet_dropped;
+static char *g_sheet_index; static size_t g_sheet_index_len; static unsigned g_sheet_index_cap;
+static UINT32 g_crc_tab[256];
+static UINT32 mad_crc32(UINT32 c, const unsigned char *b, size_t n) {
+    size_t i;
+    if (!g_crc_tab[1]) {
+        UINT32 k, j, v;
+        for (k = 0; k < 256; k++) { v = k; for (j = 0; j < 8; j++) v = (v & 1) ? 0xedb88320u ^ (v >> 1) : v >> 1; g_crc_tab[k] = v; }
+    }
+    c = ~c;
+    for (i = 0; i < n; i++) c = g_crc_tab[(c ^ b[i]) & 0xff] ^ (c >> 8);
+    return ~c;
+}
+static unsigned char *mad_png_put32(unsigned char *o, UINT32 v) { o[0] = v >> 24; o[1] = v >> 16; o[2] = v >> 8; o[3] = v; return o + 4; }
+/* An RGB8 image as a PNG with stored (uncompressed) deflate blocks: no zlib in the PE. */
+static unsigned char *mad_png_encode(const unsigned char *rgb, UINT w, UINT h, size_t *out_len) {
+    size_t row = (size_t)w * 3 + 1, raw = row * h, nblk = (raw + 65534) / 65535, cap = 8 + 25 + 12 + 2 + nblk * 5 + raw + 4 + 12;
+    unsigned char *png = malloc(cap), *o, *idat, *q;
+    UINT32 a1 = 1, a2 = 0; size_t y, x, left, pos = 0;
+    if (!png) return NULL;
+    memcpy(png, "\x89PNG\r\n\x1a\n", 8); o = png + 8;
+    o = mad_png_put32(o, 13); memcpy(o, "IHDR", 4); o += 4;
+    o = mad_png_put32(o, w); o = mad_png_put32(o, h); *o++ = 8; *o++ = 2; *o++ = 0; *o++ = 0; *o++ = 0;
+    o = mad_png_put32(o, mad_crc32(0, o - 17, 17));
+    idat = o; o += 4; memcpy(o, "IDAT", 4); o += 4;
+    *o++ = 0x78; *o++ = 0x01;
+    left = raw;
+    for (y = 0; y < h; y++) {   /* filter byte 0 + the row, split into stored blocks as we go */
+        for (x = 0; x < row; x++) {
+            unsigned char b = x ? rgb[y * (row - 1) + x - 1] : 0;
+            if (pos % 65535 == 0) {
+                size_t blen = left < 65535 ? left : 65535;
+                *o++ = blen == left ? 1 : 0; *o++ = blen & 0xff; *o++ = blen >> 8; *o++ = ~blen & 0xff; *o++ = (~blen >> 8) & 0xff;
+            }
+            *o++ = b; pos++; left--;
+            a1 = (a1 + b) % 65521; a2 = (a2 + a1) % 65521;
+        }
+    }
+    o = mad_png_put32(o, (a2 << 16) | a1);
+    mad_png_put32(idat, (UINT32)(o - idat - 8));
+    q = o; o = mad_png_put32(o, mad_crc32(0, idat + 4, (size_t)(q - idat - 4)));
+    o = mad_png_put32(o, 0); memcpy(o, "IEND", 4); o += 4; o = mad_png_put32(o, mad_crc32(0, o - 4, 4));
+    *out_len = (size_t)(o - png);
+    return png;
+}
+static float mad_h2f(UINT16 h) {
+    UINT32 sgn = (UINT32)(h >> 15) << 31, e = (h >> 10) & 31, m = h & 1023, u; float f;
+    if (e == 31) u = sgn | 0x7f800000u | (m << 13);
+    else if (e) u = sgn | ((e + 112) << 23) | (m << 13);
+    else { f = (float)m * (1.0f / 16777216.0f); return sgn ? -f : f; }
+    memcpy(&f, &u, 4); return f;
+}
+static float mad_small_float(UINT32 v, unsigned mbits) {   /* R11/G11/B10 unsigned floats */
+    UINT32 e = (v >> mbits) & 31, m = v & ((1u << mbits) - 1);
+    if (e == 31) return m ? NAN : INFINITY;
+    return e ? ldexpf(1.0f + (float)m / (float)(1u << mbits), (int)e - 15) : ldexpf((float)m / (float)(1u << mbits), -14);
+}
+static unsigned char mad_tm(float x) {   /* HDR -> display: x/(1+x), gamma 2.2 */
+    if (!(x > 0)) return 0;
+    x = x / (1.0f + x);
+    return (unsigned char)(powf(x, 1.0f / 2.2f) * 255.0f + 0.5f);
+}
+static unsigned char mad_ubyte(UINT32 v) { return v ? (unsigned char)(64 + ((v * 37u) % 192u)) : 0; }   /* integer data: 0 black, others distinct */
+/* One texel -> RGB8; returns 1 for a NaN or infinite component. */
+static int mad_texel_rgb(const unsigned char *t, UINT pf, UINT bpp, float dlo, float dhi, unsigned char o[3], int nan_only) {
+    float f[3] = { 0, 0, 0 }; unsigned n = 0, k; UINT32 u32; UINT16 u16[4];
+    o[0] = o[1] = o[2] = 0;
+    switch (pf) {
+    case 10: o[0] = o[1] = o[2] = t[0]; return 0;                                                   /* R8Unorm */
+    case 12: o[0] = o[1] = o[2] = (unsigned char)(t[0] ^ 0x80); return 0;                           /* R8Snorm */
+    case 13: case 14: o[0] = o[1] = o[2] = mad_ubyte(t[0]); return 0;
+    case 20: memcpy(u16, t, 2); o[0] = o[1] = o[2] = u16[0] >> 8; return 0;
+    case 22: memcpy(u16, t, 2); o[0] = o[1] = o[2] = (unsigned char)((u16[0] ^ 0x8000) >> 8); return 0;
+    case 23: case 24: memcpy(u16, t, 2); o[0] = o[1] = o[2] = mad_ubyte(u16[0]); return 0;
+    case 25: memcpy(u16, t, 2); f[0] = mad_h2f(u16[0]); n = 1; break;
+    case 30: o[0] = t[0]; o[1] = t[1]; return 0;
+    case 32: o[0] = t[0] ^ 0x80; o[1] = t[1] ^ 0x80; return 0;
+    case 33: case 34: o[0] = mad_ubyte(t[0]); o[1] = mad_ubyte(t[1]); return 0;
+    case 53: case 54: memcpy(&u32, t, 4); o[0] = o[1] = o[2] = mad_ubyte(u32); return 0;
+    case 55: memcpy(&f[0], t, 4); n = 1; break;
+    case 60: memcpy(u16, t, 4); o[0] = u16[0] >> 8; o[1] = u16[1] >> 8; return 0;
+    case 62: memcpy(u16, t, 4); o[0] = (u16[0] ^ 0x8000) >> 8; o[1] = (u16[1] ^ 0x8000) >> 8; return 0;
+    case 63: case 64: memcpy(u16, t, 4); o[0] = mad_ubyte(u16[0]); o[1] = mad_ubyte(u16[1]); return 0;
+    case 65: memcpy(u16, t, 4); f[0] = mad_h2f(u16[0]); f[1] = mad_h2f(u16[1]); n = 2; break;
+    case 70: case 71: o[0] = t[0]; o[1] = t[1]; o[2] = t[2]; return 0;
+    case 72: o[0] = t[0] ^ 0x80; o[1] = t[1] ^ 0x80; o[2] = t[2] ^ 0x80; return 0;
+    case 73: case 74: o[0] = mad_ubyte(t[0]); o[1] = mad_ubyte(t[1]); o[2] = mad_ubyte(t[2]); return 0;
+    case 80: case 81: o[0] = t[2]; o[1] = t[1]; o[2] = t[0]; return 0;
+    case 90: memcpy(&u32, t, 4); o[0] = (u32 & 1023) >> 2; o[1] = ((u32 >> 10) & 1023) >> 2; o[2] = ((u32 >> 20) & 1023) >> 2; return 0;
+    case 91: memcpy(&u32, t, 4); o[0] = mad_ubyte(u32 & 1023); o[1] = mad_ubyte((u32 >> 10) & 1023); o[2] = mad_ubyte((u32 >> 20) & 1023); return 0;
+    case 94: memcpy(&u32, t, 4); o[2] = (u32 & 1023) >> 2; o[1] = ((u32 >> 10) & 1023) >> 2; o[0] = ((u32 >> 20) & 1023) >> 2; return 0;
+    case 92: memcpy(&u32, t, 4); f[0] = mad_small_float(u32 & 2047, 6); f[1] = mad_small_float((u32 >> 11) & 2047, 6); f[2] = mad_small_float(u32 >> 22, 5); n = 3; break;
+    case 93: { float sc; memcpy(&u32, t, 4); sc = ldexpf(1.0f, (int)(u32 >> 27) - 24);
+               f[0] = (float)(u32 & 511) * sc; f[1] = (float)((u32 >> 9) & 511) * sc; f[2] = (float)((u32 >> 18) & 511) * sc; n = 3; break; }
+    case 103: case 104: memcpy(&u32, t, 4); o[0] = mad_ubyte(u32); memcpy(&u32, t + 4, 4); o[1] = mad_ubyte(u32); return 0;
+    case 105: memcpy(f, t, 8); n = 2; break;
+    case 110: memcpy(u16, t, 8); o[0] = u16[0] >> 8; o[1] = u16[1] >> 8; o[2] = u16[2] >> 8; return 0;
+    case 112: memcpy(u16, t, 8); o[0] = (u16[0] ^ 0x8000) >> 8; o[1] = (u16[1] ^ 0x8000) >> 8; o[2] = (u16[2] ^ 0x8000) >> 8; return 0;
+    case 113: case 114: memcpy(u16, t, 8); o[0] = mad_ubyte(u16[0]); o[1] = mad_ubyte(u16[1]); o[2] = mad_ubyte(u16[2]); return 0;
+    case 115: memcpy(u16, t, 8); for (k = 0; k < 3; k++) f[k] = mad_h2f(u16[k]); n = 3; break;
+    case 123: case 124: for (k = 0; k < 3; k++) { memcpy(&u32, t + 4 * k, 4); o[k] = mad_ubyte(u32); } return 0;
+    case 125: memcpy(f, t, 12); n = 3; break;
+    case 250: case 252: case 260: {   /* depth, stretched over the range this image uses */
+        float d;
+        if (bpp == 2) { memcpy(u16, t, 2); d = (float)u16[0] / 65535.0f; } else memcpy(&d, t, 4);
+        if (d != d) { o[0] = 255; o[2] = 255; return 1; }
+        d = dhi > dlo ? (d - dlo) / (dhi - dlo) : 0.5f;
+        o[0] = o[1] = o[2] = (unsigned char)(d < 0 ? 0 : d > 1 ? 255 : d * 255.0f);
+        return 0;
+    }
+    case 253: o[0] = o[1] = o[2] = mad_ubyte(t[0]); return 0;
+    default:
+        for (k = 0; k < 3 && k < bpp; k++) o[k] = t[k];
+        return 0;
+    }
+    for (k = 0; k < n; k++) if (!isfinite(f[k])) { o[0] = 255; o[1] = 0; o[2] = 255; return 1; }
+    if (nan_only) return 0;
+    if (n == 1) { o[0] = o[1] = o[2] = mad_tm(f[0]); return 0; }
+    if (n == 2) {   /* two channels: signed data (normals, motion) shown around mid grey */
+        for (k = 0; k < 2; k++) o[k] = (f[k] < 0 || pf == 105) ? (unsigned char)(fminf(fmaxf(f[k] * 0.5f + 0.5f, 0.0f), 1.0f) * 255.0f) : mad_tm(f[k]);
+        return 0;
+    }
+    for (k = 0; k < 3; k++) o[k] = mad_tm(f[k]);
+    return 0;
+}
+static const UINT16 g_digits[10] = { 075557, 026227, 071747, 071717, 055711, 074717, 074757, 071111, 075757, 075717 };   /* 3x5, rows of 3 bits */
+static void mad_sheet_number(unsigned char *img, unsigned x0, unsigned y0, unsigned num) {
+    char txt[12]; unsigned n = (unsigned)snprintf(txt, sizeof txt, "%u", num), i, x, y, sc = 3;
+    unsigned bw = n * 4 * sc + sc, bh = 7 * sc;
+    for (y = 0; y < bh; y++) for (x = 0; x < bw; x++) { unsigned char *px = img + ((size_t)(y0 + y) * MAD_SH_W + x0 + x) * 3; px[0] = px[1] = px[2] = 0; }
+    for (i = 0; i < n; i++) {
+        UINT16 g = g_digits[txt[i] - '0'];
+        for (y = 0; y < 5; y++) for (x = 0; x < 3; x++) if (g & (1u << (14 - (y * 3 + x)))) {
+            unsigned yy, xx;
+            for (yy = 0; yy < sc; yy++) for (xx = 0; xx < sc; xx++) {
+                unsigned char *px = img + ((size_t)(y0 + sc + y * sc + yy) * MAD_SH_W + x0 + sc + i * 4 * sc + x * sc + xx) * 3;
+                px[0] = 255; px[1] = 230; px[2] = 0;
+            }
+        }
+    }
+}
+static void mad_sheet_index_add(const char *line) {
+    size_t l = strlen(line);
+    if (!mad_grow((void **)&g_sheet_index, &g_sheet_index_cap, (unsigned)(g_sheet_index_len + l + 1), 1)) return;
+    memcpy(g_sheet_index + g_sheet_index_len, line, l + 1); g_sheet_index_len += l;
+}
+static void mad_sheet_flush(UINT64 frame) {
+    struct madeira_ctl_args a; size_t len = 0; unsigned char *png;
+    if (!g_sheet || !g_sheet_cells) return;
+    png = mad_png_encode(g_sheet, MAD_SH_W, MAD_SH_H, &len);
+    if (png) {
         memset(&a, 0, sizeof a);
-        a.op = 1; a.ptr = (UINT64)(ULONG_PTR)c->cpu; a.len = c->bytes;
-        snprintf(a.name, sizeof a.name, "f%llu_e%05u_%s%u_%ux%u_pf%u_dx%u_%s.raw", (unsigned long long)frame, c->enc, c->kind, c->idx, c->w, c->h, c->pf, c->dxgi, c->name);
+        a.op = 1; a.ptr = (UINT64)(ULONG_PTR)png; a.len = len;
+        snprintf(a.name, sizeof a.name, "f%llu_sheet%02u.png", (unsigned long long)frame, g_sheet_no);
         MadeiraCtl(&a);
-        ok += a.ret ? 1 : 0;
-        d3d12_log("[capture] %s %s (%llu bytes, bpr %u)\n", a.ret ? "wrote" : "FAILED", a.name, (unsigned long long)c->bytes, c->bpr);
+        if (a.ret) g_sheet_files++;
+        d3d12_log("[capture-sheet] %s %s (%u thumbnails, %zu KB)\n", a.ret ? "wrote" : "FAILED to write", a.name, g_sheet_cells, len >> 10);
+        free(png);
+    }
+    g_sheet_no++; g_sheet_cells = 0;
+    memset(g_sheet, 40, (size_t)MAD_SH_W * MAD_SH_H * 3);
+}
+/* One captured image -> the next cell of the current sheet, plus an index line. */
+static void mad_sheet_add(const struct mad_capbuf *c, UINT64 frame) {
+    UINT bpp, tw, th, x, y, cx, cy, ox, oy; float sc, dlo = 1e30f, dhi = -1e30f; UINT64 nan = 0; char line[320];
+    const unsigned char *base = c->cpu; int isdepth = c->pf == 250 || c->pf == 252 || c->pf == 260;
+    if (!c->w || !c->h || !c->cpu) return;
+    if (g_sheet_thumbs >= MAD_SH_MAX_THUMBS) { g_sheet_dropped++; return; }
+    if (!g_sheet) { g_sheet = malloc((size_t)MAD_SH_W * MAD_SH_H * 3); if (!g_sheet) return; memset(g_sheet, 40, (size_t)MAD_SH_W * MAD_SH_H * 3); }
+    bpp = c->bpr / c->w; if (!bpp) bpp = 1;
+    sc = fminf((float)MAD_SH_CW / (float)c->w, (float)MAD_SH_CH / (float)c->h);
+    tw = (UINT)(c->w * sc); th = (UINT)(c->h * sc); if (!tw) tw = 1; if (!th) th = 1;
+    if (isdepth || c->pf == 55 || c->pf == 25 || c->pf == 65 || c->pf == 105 || c->pf == 115 || c->pf == 125 || c->pf == 92) {
+        /* full scan: NaN/Inf count (floats) and the depth range */
+        UINT step = (c->w * c->h > 4u << 20) ? 2 : 1;
+        for (y = 0; y < c->h; y += step) for (x = 0; x < c->w; x += step) {
+            const unsigned char *t = base + (size_t)y * c->bpr + (size_t)x * bpp; unsigned char o[3];
+            if (isdepth) {
+                float d; UINT16 u;
+                if (bpp == 2) { memcpy(&u, t, 2); d = u / 65535.0f; } else memcpy(&d, t, 4);
+                if (d != d) nan++; else { if (d < dlo) dlo = d; if (d > dhi) dhi = d; }
+            } else nan += (UINT64)mad_texel_rgb(t, c->pf, bpp, 0, 0, o, 1);
+        }
+    }
+    cx = MAD_SH_GAP + (g_sheet_cells % MAD_SH_COLS) * (MAD_SH_CW + MAD_SH_GAP);
+    cy = MAD_SH_GAP + (g_sheet_cells / MAD_SH_COLS) * (MAD_SH_CH + MAD_SH_GAP);
+    ox = cx + (MAD_SH_CW - tw) / 2; oy = cy + (MAD_SH_CH - th) / 2;
+    for (y = 0; y < th; y++) {
+        UINT sy = (UINT)((UINT64)y * c->h / th);
+        for (x = 0; x < tw; x++) {
+            UINT sx = (UINT)((UINT64)x * c->w / tw);
+            unsigned char *px = g_sheet + ((size_t)(oy + y) * MAD_SH_W + ox + x) * 3;
+            mad_texel_rgb(base + (size_t)sy * c->bpr + (size_t)sx * bpp, c->pf, bpp, dlo, dhi, px, 0);
+        }
+    }
+    g_sheet_thumbs++;
+    mad_sheet_number(g_sheet, cx, cy, g_sheet_thumbs);
+    snprintf(line, sizeof line, "#%u sheet%02u cell %u: enc#%05u %s%u %ux%u pf%u dx%u %s | %s",
+             g_sheet_thumbs, g_sheet_no, g_sheet_cells + 1, c->enc, c->kind, c->idx, c->w, c->h, c->pf, c->dxgi, c->name,
+             c->what[0] ? c->what : "-");
+    if (nan) snprintf(line + strlen(line), sizeof line - strlen(line), " NaN/Inf=%llu", (unsigned long long)nan);
+    if (isdepth && dhi >= dlo) snprintf(line + strlen(line), sizeof line - strlen(line), " depth %.5f..%.5f", dlo, dhi);
+    d3d12_log("[capture-sheet] %s\n", line);
+    strcat(line, "\n"); mad_sheet_index_add(line);
+    if (++g_sheet_cells == MAD_SH_COLS * MAD_SH_ROWS) mad_sheet_flush(frame);
+}
+/* Turn every capture whose GPU copy is done into thumbnails (and raw files for
+ * the targeted input kinds, or everything with capture-raw = 1), then free it.
+ * Runs at the end of each ExecuteCommandLists of the CAP frame once enough is
+ * pending -- so a frame's captures never pile up past the budget on a phone
+ * with ~1 GB free -- and at the Present that ends the frame (final). */
+static void mad_capture_drain(struct mad_device *d, UINT64 frame, int final) {
+    unsigned i, n0, ok = 0;
+    AcquireSRWLockShared(&g_cap_lock); n0 = g_ncapbufs; ReleaseSRWLockShared(&g_cap_lock);
+    if (n0) {
+        mad_device_flush_all(d);
+        if (d->gpu_event) MTLSharedEvent_waitUntilSignaledValue(d->gpu_event, (UINT64)d->gpu_serial_committed, 10000);
+    }
+    AcquireSRWLockExclusive(&g_cap_lock);
+    for (i = 0; i < n0 && i < g_ncapbufs; i++) {
+        struct mad_capbuf *c = &g_capbufs[i];
+        int thumb = !strcmp(c->kind, "rt") || !strcmp(c->kind, "depth") || !strcmp(c->kind, "stencil") || !strcmp(c->kind, "uav");
+        if (thumb) mad_sheet_add(c, frame);
+        if (!thumb || g_cap_raw) {
+            struct madeira_ctl_args a;
+            memset(&a, 0, sizeof a);
+            a.op = 1; a.ptr = (UINT64)(ULONG_PTR)c->cpu; a.len = c->bytes;
+            snprintf(a.name, sizeof a.name, "f%llu_e%05u_%s%u_%ux%u_pf%u_dx%u_%s.raw", (unsigned long long)frame, c->enc, c->kind, c->idx, c->w, c->h, c->pf, c->dxgi, c->name);
+            MadeiraCtl(&a);
+            ok += a.ret ? 1 : 0;
+            d3d12_log("[capture] %s %s (%llu bytes, bpr %u)\n", a.ret ? "wrote" : "FAILED", a.name, (unsigned long long)c->bytes, c->bpr);
+        }
+        g_cap_bytes -= c->bytes < g_cap_bytes ? c->bytes : g_cap_bytes;
         NSObject_release(c->buf);
     }
-    d3d12_log("[capture] frame %llu complete: %u of %u files written, %llu MB, in Documents/capture/\n", (unsigned long long)frame, ok, g_ncapbufs, (unsigned long long)mb);
-    g_ncapbufs = 0; g_cap_bytes = 0;
+    if (i) { memmove(g_capbufs, g_capbufs + i, (g_ncapbufs - i) * sizeof *g_capbufs); g_ncapbufs -= i; }
+    if (final) {
+        struct madeira_ctl_args a;
+        mad_sheet_flush(frame);
+        if (g_sheet_index_len) {
+            memset(&a, 0, sizeof a);
+            a.op = 1; a.ptr = (UINT64)(ULONG_PTR)g_sheet_index; a.len = g_sheet_index_len;
+            snprintf(a.name, sizeof a.name, "f%llu_sheets_index.txt", (unsigned long long)frame);
+            MadeiraCtl(&a);
+        }
+        d3d12_log("[capture] frame %llu complete: %u thumbnails on %u sheet(s) (%u dropped past %u, %u over the memory budget), %u raw files, in Documents/capture/\n",
+                  (unsigned long long)frame, g_sheet_thumbs, g_sheet_files, g_sheet_dropped, MAD_SH_MAX_THUMBS, g_cap_skipped, ok);
+        g_sheet_thumbs = g_sheet_files = g_sheet_dropped = g_sheet_no = 0; g_sheet_index_len = 0; g_cap_skipped = 0;
+        free(g_sheet); g_sheet = NULL; g_sheet_cells = 0;
+    } else if (ok) d3d12_log("[capture] %u raw files written mid-frame\n", ok);
+    ReleaseSRWLockExclusive(&g_cap_lock);
 }
+static void mad_capture_finish(struct mad_device *d, UINT64 frame) { mad_capture_drain(d, frame, 1); }
 /* ml1098: a madeira.cfg integer, through the bridge (the PE has no sandbox path). */
 static int mad_cfg_str_pe(const char *key, char *out, size_t cap) {   /* ml1106 */
     struct madeira_ctl_args a;
@@ -1911,7 +2171,7 @@ static void mad_capture_draw_inputs(struct mad_exec *e, const struct mad_cmd *c)
         if (!r || !r->texture) continue;
         d3d12_log("[capture-draw] t%u -> view %llu = %s %ux%u pf%u dx%u mips %u layers %u (subview %d)\n", rg->lower_bound,
                   (unsigned long long)de.texture_view_id, r->name ? r->name : "?", r->width, r->height, (unsigned)r->tex_pf, (unsigned)r->desc.Format, r->tex_mips, r->tex_layers, xv);
-        if (said_tex++ < 64) mad_capture_one(e, benc, r, &v0, seq, 100 + rg->lower_bound, "tex", 0);
+        if (said_tex++ < 64) mad_capture_one(e, benc, r, &v0, seq, 100 + rg->lower_bound, "tex", 0, NULL);
     }
     exec_fence_blit(e, benc, 1);
     MTLCommandEncoder_endEncoding(benc);
@@ -1987,7 +2247,7 @@ static void mad_capture_dispatch_inputs(struct mad_exec *e, const struct mad_cmd
                         if (u < nseen || nseen >= 96) continue;
                         seen[nseen++] = r;
                         { struct mad_rtvp v; memset(&v, 0, sizeof v); v.level = (UINT16)l0; v.slice = (UINT16)s0; v.layers = 1;
-                          mad_capture_one(e, benc, r, &v, seq, i * 1000 + off + k, "tex", 0); }
+                          mad_capture_one(e, benc, r, &v, seq, i * 1000 + off + k, "tex", 0, NULL); }
                     } else if (de->gpu_va) {
                         UINT64 boff = 0; struct mad_resource *br = mad_resolve_address(d, de->gpu_va, &boff);
                         d3d12_log("[capture-cs] p%u %s %c%u space%u: buffer %s size %llu +%llu, metadata 0x%llx%s\n", i, rn,
@@ -2003,6 +2263,56 @@ static void mad_capture_dispatch_inputs(struct mad_exec *e, const struct mad_cmd
             }
         }
     }
+    exec_fence_blit(e, benc, 1);
+    MTLCommandEncoder_endEncoding(benc);
+}
+/* madeira-bcd: during a CAP frame, the texture UAVs a dispatch can write
+ * (bounded descriptor-table UAV ranges) are captured right after it, so the
+ * contact sheets show compute passes too -- a tiled pass that leaves tiles
+ * untouched or writes NaN shows up in the dispatch that did it. */
+static void mad_capture_dispatch_outputs(struct mad_exec *e, const struct mad_cmd *c) {
+    struct mad_device *d = e->q->device; const struct mad_rootsig *rs = e->crs;
+    struct mad_resource *outs[4]; struct mad_rtvp vs[4]; unsigned nout = 0, i, k, ri, u, seq;
+    obj_handle_t benc; char what[64];
+    if (!rs || !e->cpso || g_sheet_thumbs + g_ncapbufs >= MAD_SH_MAX_THUMBS) return;
+    for (i = 0; i < rs->nparams && i < MAD_ROOT_PARAM_MAX && nout < 4; i++) {
+        const struct madeira_ir_root_param *p = &rs->params[i]; UINT64 va = e->croot[i];
+        unsigned base, run = 0;
+        if (p->type != MADEIRA_IR_PARAM_TABLE || !e->srv || !e->srv->cpu) continue;
+        if (va < e->srv->gpu_address || va >= e->srv->gpu_address + (UINT64)e->srv->count * sizeof(struct mad_descriptor)) continue;
+        base = (unsigned)((va - e->srv->gpu_address) / sizeof(struct mad_descriptor));
+        for (ri = 0; ri < p->num_ranges && nout < 4; ri++) {
+            const struct madeira_ir_root_range *rg; unsigned nd, off;
+            if (p->first_range + ri >= rs->nranges) break;
+            rg = &rs->ranges[p->first_range + ri];
+            nd = rg->num_descriptors;
+            off = rg->table_offset != 0xffffffffu ? rg->table_offset : run;
+            if (nd == 0xffffffffu) break;   /* unbounded (bindless): cannot tell which ones are written */
+            run = off + nd;
+            if (rg->range_type != MADEIRA_IR_RANGE_UAV || nd > 16) continue;
+            for (k = 0; k < nd && base + off + k < e->srv->count && nout < 4; k++) {
+                const struct mad_descriptor *de = &e->srv->cpu[base + off + k];
+                int xv = -1; struct mad_resource *r;
+                if (!de->texture_view_id || (de->metadata >> 63)) continue;
+                r = mad_texture_of_view(d, de->texture_view_id, &xv);
+                if (!r || !r->texture || r->samples > 1 || r->tex_type == WMTTextureType3D || r->width < 8 || r->height < 8) continue;
+                for (u = 0; u < nout; u++) if (outs[u] == r) break;
+                if (u < nout) continue;
+                memset(&vs[nout], 0, sizeof vs[nout]); vs[nout].layers = 1;
+                if (xv >= 0) { vs[nout].level = (UINT16)r->xview[xv].lvl0; vs[nout].slice = (UINT16)r->xview[xv].sl0; }
+                outs[nout++] = r;
+            }
+        }
+    }
+    if (!nout) return;
+    if (c->kind == MC_DISPATCH_INDIRECT) snprintf(what, sizeof what, "cs %016llx indirect", (unsigned long long)e->cpso->cs_hash);
+    else snprintf(what, sizeof what, "cs %016llx %ux%ux%u", (unsigned long long)e->cpso->cs_hash, c->u.dispatch.x, c->u.dispatch.y, c->u.dispatch.z);
+    seq = e->cenc_seq;
+    exec_end(e);
+    benc = MTLCommandBuffer_blitCommandEncoder(e->cb); if (!benc) return;
+    g_enc_seq++;
+    exec_fence_blit(e, benc, 0);
+    for (i = 0; i < nout; i++) mad_capture_one(e, benc, outs[i], &vs[i], seq, i, "uav", 0, what);
     exec_fence_blit(e, benc, 1);
     MTLCommandEncoder_endEncoding(benc);
 }
@@ -4665,6 +4975,7 @@ static void exec_dispatch(struct mad_exec *e, const struct mad_cmd *c) {
 #undef MAD_APPEND
     MTLComputeCommandEncoder_encodeCommands(e->cenc, (const struct wmtcmd_base *)&c_pso);
     e->draws++;
+    if (g_capture_on && g_cap_uav) mad_capture_dispatch_outputs(e, c);   /* madeira-bcd: contact sheets */
     if (e->ncap_after_buf) {   /* ml922 */
         unsigned j; for (j = 0; j < e->ncap_after_buf; j++) exec_capture_bytes(e, e->cap_after_buf[j].label, e->cap_after_buf[j].r, e->cap_after_buf[j].off, 64, 15);
         e->ncap_after_buf = 0;
@@ -4887,6 +5198,9 @@ static void mad_ecl_run(ID3D12CommandQueue *This, UINT count, ID3D12CommandList 
         if (q->open_lists >= 48) mad_queue_flush(q);   /* bound the batch */
     }
     if (ml1021_q) LeaveCriticalSection(&ml1021_q->submit_lock);   /* ml1021 */
+    /* madeira-bcd: CAP frame -- thumbnail and free what this submission captured
+     * before the frame's captures can exceed the memory budget */
+    if (g_capture_on && ml1021_q && g_cap_bytes >= (48ull << 20)) mad_capture_drain(ml1021_q->device, g_capture_frame, 0);
     if (ml1049_pool) NSObject_release(ml1049_pool);
 }
 enum { MAD_SUB_ECL = 1, MAD_SUB_SIGNAL, MAD_SUB_WAIT, MAD_SUB_PRESENT };
@@ -11674,6 +11988,10 @@ static void mad_present_run(struct mad_swapchain *s, UINT idx) {
                                               g_capture_cs_ind ? "indirect only" : "direct and indirect", g_capture_cs_max);
             }
             g_capture_cs_shots = 0;
+            g_cap_uav = mad_cfg_int_pe("capture-uav", 1) ? 1 : 0;   /* madeira-bcd: contact sheets */
+            g_cap_raw = mad_cfg_int_pe("capture-raw", 0) ? 1 : 0;
+            d3d12_log("[capture] contact sheets on (compute UAV outputs %s, raw files %s; madeira.cfg capture-uav / capture-raw)\n",
+                      g_cap_uav ? "included" : "off", g_cap_raw ? "too" : "off");
             d3d12_log("[capture] ===== capturing frame %llu (everything between present #%llu and #%llu; draw-dump forced on) =====\n",
                       (unsigned long long)g_capture_frame, (unsigned long long)s->presents, (unsigned long long)s->presents + 1);
         }

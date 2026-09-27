@@ -439,3 +439,15 @@ Local compile check of `madeira_d3d12` (no device needed): llvm-mingw
   WITHOUT a `[cxx-throw] #` line, parameter 3 was fine and the vcruntime
   per-thread data (`_ThrowImageBase` in the FLS ptd) is the suspect instead.
 
+### Build 189: contact sheets for the black squares (no Mac needed)
+The owner will not have a Mac soon, so visual bugs must be diagnosed from the
+phone. Build 189 adds CAP contact sheets (docs/madeira-bcd.md): press CAP in
+the overlay while the black squares are visible; `Documents/capture/` then
+holds `f<frame>_sheet00.png ...` (20 numbered thumbnails each) and
+`f<frame>_sheets_index.txt`; the log has the same `[capture-sheet]` lines.
+Ask the owner for the sheets (as images) plus the log. Reading them: find the
+first thumbnail (in encoder order) where the squares appear, magenta = NaN/Inf.
+If it is a `cs <hash>` thumbnail, that dispatch produced them: next step is
+`capture-cs` / the fault-shader machinery on that hash (dump its DXIL with
+`tools/dxil-disasm.py`). Build 189 also carries build 188's C++ throw repair.
+

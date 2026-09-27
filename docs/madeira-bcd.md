@@ -235,6 +235,21 @@ already did.
   so once that band filled it got STATUS_NO_MEMORY (Ghost of Tsushima: 1 MB,
   then the game stopped itself). The band above the windows is now tried
   before relaxing or failing (`[wow-window] ... placed above them`).
+- CAP contact sheets (`research/madeira-d3d12/src/pe/madeira_d3d12.c`,
+  `mad_sheet_*`, `mad_capture_drain`, `mad_capture_dispatch_outputs`): the
+  overlay's CAP button now turns every render-pass attachment of the captured
+  frame AND the texture UAVs each compute dispatch can write (bounded table
+  ranges) into numbered 320x180 thumbnails on PNG sheets of 20
+  (`Documents/capture/f<frame>_sheetNN.png`, stored-deflate PNG written in the
+  PE), with an index (`f<frame>_sheets_index.txt` and `[capture-sheet]` log
+  lines: number, encoder, kind, size, Metal/DXGI format, resource, pass or
+  `cs <bytecode hash> <groups>`). NaN/Inf texels are magenta and counted, depth
+  is stretched over its own range, integer formats get distinct colours per
+  value. Captures are thumbnailed and freed at the end of each
+  ExecuteCommandLists once 48 MB are pending, so a frame never holds more than
+  the budget; at most 480 thumbnails. `madeira.cfg`: `capture-uav = 0` drops
+  compute outputs, `capture-raw = 1` also writes the raw files for
+  `build/tools/capture-to-png.py`. Replaces the Mac-only raw workflow.
 - C++ throw repair (`build/ntdll-unix/thread_ios.c`, `NtRaiseException`): a
   64-bit C++ exception (0xE06D7363, 4 parameters) whose ThrowInfo pointer is a
   JIT-pool alias is mapped back to the PE image and gets that image's base as
