@@ -250,6 +250,18 @@ already did.
   the budget; at most 480 thumbnails. `madeira.cfg`: `capture-uav = 0` drops
   compute outputs, `capture-raw = 1` also writes the raw files for
   `build/tools/capture-to-png.py`. Replaces the Mac-only raw workflow.
+- Depth-stencil planes in copies (`madeira_d3d12.c`,
+  `mad_subresource_plane`, `exec_copy_aspect`, `tools/patch-dxmt-b2t-aspect.py`):
+  subresource indices of a depth-stencil resource are split into mip, slice
+  and PLANE (plane 1 = stencil) instead of reading plane 1 as array slice 1.
+  Texture<->buffer copies pass the aspect as MTLBlitOptionDepthFromDepthStencil
+  / StencilFromDepthStencil (buffer->texture through the command's reserved[0],
+  which the CI patch makes winemetal honour); texture<->texture copies between
+  a depth or stencil plane and a colour texture (or with differing formats) go
+  through a private staging buffer in two blit encoders. Ghost of Tsushima
+  copies its stencil plane to an R8 texture and back each frame; the write-back
+  landed past the texture, over depth and stencil: the black squares and the
+  green block pattern.
 - Alias report for captures (`madeira_d3d12.c`, `mad_pl_*`, `mad_alias_desc`,
   `mad_capture_log_op`): every resource gets a creation number (`r#N`), every
   heap one (`heapN`), and each DEFAULT heap keeps the list of resources placed

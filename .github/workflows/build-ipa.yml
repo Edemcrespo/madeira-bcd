@@ -821,6 +821,9 @@ jobs:
       - name: Patch DXMT with GPU fault attribution
         run: python3 tools/patch-dxmt-gpu-fault-info.py
 
+      - name: Patch DXMT buffer->texture blits with a depth/stencil aspect
+        run: python3 tools/patch-dxmt-b2t-aspect.py
+
       - name: Build dxmt-ios
         shell: bash
         run: |

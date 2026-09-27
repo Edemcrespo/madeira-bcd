@@ -503,3 +503,16 @@ Contact sheets work (283 thumbnails, 15 sheets). Findings:
   the first 64 of unbounded ones) that resolves to no live texture or to a
   render-target / depth texture.
 
+### Build 192 result (log 2026-09-27 22:18): black squares ROOT CAUSE found
+Two CAPs worked (no crash). Frame 2311: the depth r#465 is clean at
+enc#197148 (`ps_Copy`) and has 14336 NaN at enc#197163; `[capture-op]` in
+between: `copy texture r#465 -> ... r#241` (stencil plane to an 800x600 R8
+texture) and `copy texture r#241 -> r#465 mip 0 slice 1` -- D3D12
+subresource 1 of a one-layer D32S8 resource is the STENCIL PLANE, which
+Madeira decoded as array slice 1, so the copy wrote past the texture over
+its depth and stencil memory. Build 193 decodes planes and copies aspects
+properly (docs/madeira-bcd.md "Depth-stencil planes in copies"). Also seen:
+UAV descriptors holding texture ids that resolve to no live texture (0x6cdc..
+0x6cde, many shaders) and cs 3bc86a8a91b059a4 u8 resolving to the depth
+(probably unused table slots; watch after the fix).
+
