@@ -405,3 +405,37 @@ Local compile check of `madeira_d3d12` (no device needed): llvm-mingw
   If GoT gets through gameplay with it, the underlying race (job refcount /
   wait ordering under FEX) is still worth finding with the free-origin trace
   (set `MADEIRA_FREE_DELAY_MS=0` in madeira.cfg `env.` to reproduce).
+
+### Build 187 result (log 2026-09-27 20:20, 1024x768, Adaptive Power was on)
+* **The freed-while-used crash is gone.** The whole opening scene played for
+  ~3 minutes, horse riding and control hand-over worked, the owner played ~2
+  minutes with the touchpad, opened the menu and saved. `[free-delay]` held
+  8 releases (1-8 MB each). Footprint peaked at 7.34 GB (limit 8 GB).
+* HUD: GPU 14-44 ms/frame, 10-32 FPS; Metal warns about many render passes
+  with similar attachments, interleaved blit encoders and runtime pipeline
+  compiles (1000-1600 pipelines compiled during play). The log's render pass
+  report: `ended by: targets 298, clear 77, dispatch 370 ... attachment
+  load+store ~14848 MB` per 600 lists -- merging passes is a real FPS lever.
+* Black squares (fixed screen positions, ~64 px) and a green block pattern in
+  the lower part of the image remain. Still unexplained; a Metal frame
+  capture (Mac + Xcode) is the fastest way to name the pass.
+* **New crash after the save**: main thread AV READ of 0x16694 in
+  VCRUNTIME140_1 (x64, `__CxxFrameHandler4`): `mov r12d,[rax+rbx]` with
+  rbx = ThrowInfo->pCatchableTypeArray RVA and rax = `_GetThrowImageBase()`
+  = 0. So a C++ exception arrived with ThrowImageBase (parameter 3) = 0.
+  The stale guest state had rax = 0x11fb3e6a0, a JIT-pool alias inside
+  msvcp140.dll's pool copy -- i.e. the ThrowInfo pointer was probably a pool
+  VA, which `RtlPcToFileHeader` cannot map to a module. (The later crash of
+  thread 0x50 is crs-handler.exe, the game's crash reporter, reacting.)
+  The PE ntdll (`app/Madeira/arm64ec-windows/ntdll.dll`) is a tracked
+  upstream binary and is NOT compiled by CI, so `RtlPcToFileHeader` cannot be
+  fixed there.
+* **Build 188**: unix `NtRaiseException` (`build/ntdll-unix/thread_ios.c`)
+  repairs 64-bit C++ throws (0xE06D7363, 4 parameters) before dispatch: a
+  pool-alias ThrowInfo is mapped back to the PE VA and its module base is
+  filled in; a base of 0 is filled from the owning MEM_IMAGE allocation.
+  Log: `[cxx-throw] #N ThrowInfo ... base ... -> ...: <how>` (first 32) and
+  `[cxx-throw] ok ...` for the first 4 normal throws. If the crash returns
+  WITHOUT a `[cxx-throw] #` line, parameter 3 was fine and the vcruntime
+  per-thread data (`_ThrowImageBase` in the FLS ptd) is the suspect instead.
+

@@ -235,6 +235,12 @@ already did.
   so once that band filled it got STATUS_NO_MEMORY (Ghost of Tsushima: 1 MB,
   then the game stopped itself). The band above the windows is now tried
   before relaxing or failing (`[wow-window] ... placed above them`).
+- C++ throw repair (`build/ntdll-unix/thread_ios.c`, `NtRaiseException`): a
+  64-bit C++ exception (0xE06D7363, 4 parameters) whose ThrowInfo pointer is a
+  JIT-pool alias is mapped back to the PE image and gets that image's base as
+  ThrowImageBase; a ThrowImageBase of 0 is filled from the owning MEM_IMAGE
+  allocation. Otherwise `__CxxFrameHandler4` reads 0+RVA and the game dies
+  (Ghost of Tsushima after saving). Log: `[cxx-throw]`.
 - Delayed release (`build/ntdll-unix/virtual_ios.c`, `ios_fd_*`): a whole-view
   MEM_RELEASE of a private 1-16 MB guest-band allocation succeeds at once but
   stays mapped for `MADEIRA_FREE_DELAY_MS` (default 2000 ms, 0 = off; at most
