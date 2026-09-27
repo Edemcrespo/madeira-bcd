@@ -70,6 +70,14 @@
     X(IRShaderReflectionReleaseGeometryInfo) \
     X(IRErrorGetCode) \
     X(IRErrorDestroy)
+/* madeira-bcd: optional. A converter without them still converts everything
+ * else; a DXIL hull/domain shader then reports no tessellation numbers and its
+ * pipeline stays a placeholder. */
+#define IR_OPT_FUNC_LIST(X) \
+    X(IRShaderReflectionCopyHullInfo) \
+    X(IRShaderReflectionReleaseHullInfo) \
+    X(IRShaderReflectionCopyDomainInfo) \
+    X(IRShaderReflectionReleaseDomainInfo)
 
 struct IRFns {
     void *handle;
@@ -77,6 +85,7 @@ struct IRFns {
     int   status;          /* madeira_ir_status when not ready */
 #define IR_DECL(n) decltype(&::n) n;
     IR_FUNC_LIST(IR_DECL)
+    IR_OPT_FUNC_LIST(IR_DECL)
 #undef IR_DECL
 };
 static IRFns g_ir;
@@ -128,6 +137,9 @@ bind:
     }
     IR_FUNC_LIST(IR_BIND)
 #undef IR_BIND
+#define IR_BIND_OPT(n) g_ir.n = (decltype(&::n))dlsym(g_ir.handle, #n);
+    IR_OPT_FUNC_LIST(IR_BIND_OPT)
+#undef IR_BIND_OPT
 
     g_ir.ready = 1;
     g_ir.status = MADEIRA_IR_OK;
@@ -1337,6 +1349,9 @@ extern "C" int madeira_ir_convert_impl(struct madeira_ir_convert_args *a) {
                                              (no_bc ? 0 : IRCompatibilityFlagBoundsCheck) | extra));
     }
     a->ret_len2 = 0; a->ret_vs_output_size = 0; a->ret_gs_max_prims = 0; a->ret_gs_payload = 0; a->ret_gs_passthrough = 0;
+    a->ret_hs_patches_per_tg = a->ret_hs_threads_per_patch = a->ret_hs_input_cps = a->ret_hs_output_cps = 0;   /* madeira-bcd */
+    a->ret_hs_output_cp_size = a->ret_hs_patch_const_size = a->ret_hs_out_prim = a->ret_hs_max_factor_bits = 0;
+    a->ret_ds_prims_per_mesh_tg = a->ret_ds_input_cps = a->ret_ds_input_cp_size = a->ret_ds_patch_const_size = 0;
     if (a->gs_emulation) {   /* ml927 */
         IRInputTopology topo = IRInputTopologyTriangle;
         if (a->input_topology == 1) topo = IRInputTopologyPoint;
@@ -1479,6 +1494,39 @@ extern "C" int madeira_ir_convert_impl(struct madeira_ir_convert_args *a) {
                 if (lib2) g_ir.IRMetalLibBinaryDestroy(lib2);
             }
         }
+        /* madeira-bcd: DXIL tessellation. A hull or domain shader converted for
+         * the converter's emulation reports the numbers the pipeline and every
+         * draw need (IRRuntimeTessellationPipelineConfig, and the domain side
+         * of IRRuntimeValidateTessellationPipeline). */
+        if (a->gs_emulation && stage == IRShaderStageHull &&
+            g_ir.IRShaderReflectionCopyHullInfo && g_ir.IRShaderReflectionReleaseHullInfo) {
+            IRVersionedHSInfo hsi;
+            memset(&hsi, 0, sizeof hsi);
+            if (g_ir.IRShaderReflectionCopyHullInfo(refl, IRReflectionVersion_1_0, &hsi)) {
+                float mf = hsi.info_1_0.max_tessellation_factor;
+                a->ret_hs_patches_per_tg = hsi.info_1_0.max_patches_per_object_threadgroup;
+                a->ret_hs_threads_per_patch = hsi.info_1_0.max_object_threads_per_patch;
+                a->ret_hs_input_cps = hsi.info_1_0.input_control_point_count;
+                a->ret_hs_output_cps = hsi.info_1_0.output_control_point_count;
+                a->ret_hs_output_cp_size = hsi.info_1_0.output_control_point_size;
+                a->ret_hs_patch_const_size = hsi.info_1_0.patch_constants_size;
+                a->ret_hs_out_prim = (uint32_t)hsi.info_1_0.tessellator_output_primitive;
+                memcpy(&a->ret_hs_max_factor_bits, &mf, sizeof mf);
+                g_ir.IRShaderReflectionReleaseHullInfo(&hsi);
+            }
+        }
+        if (a->gs_emulation && stage == IRShaderStageDomain &&
+            g_ir.IRShaderReflectionCopyDomainInfo && g_ir.IRShaderReflectionReleaseDomainInfo) {
+            IRVersionedDSInfo dsi;
+            memset(&dsi, 0, sizeof dsi);
+            if (g_ir.IRShaderReflectionCopyDomainInfo(refl, IRReflectionVersion_1_0, &dsi)) {
+                a->ret_ds_prims_per_mesh_tg = dsi.info_1_0.max_input_prims_per_mesh_threadgroup;
+                a->ret_ds_input_cps = dsi.info_1_0.input_control_point_count;
+                a->ret_ds_input_cp_size = dsi.info_1_0.input_control_point_size;
+                a->ret_ds_patch_const_size = dsi.info_1_0.patch_constants_size;
+                g_ir.IRShaderReflectionReleaseDomainInfo(&dsi);
+            }
+        }
         if (stage == IRShaderStageGeometry && g_ir.IRShaderReflectionCopyGeometryInfo) {   /* ml927 */
             IRVersionedGSInfo gsi;
             memset(&gsi, 0, sizeof gsi);
@@ -1490,6 +1538,13 @@ extern "C" int madeira_ir_convert_impl(struct madeira_ir_convert_args *a) {
             }
         }
     }
+    /* madeira-bcd: an emulated hull/domain stage is looked up by the
+     * converter's fixed names when its pipeline is built, never by this one;
+     * name it so an empty reflection name cannot fail the conversion. */
+    if (a->gs_emulation && a->out_entry && !*(const char *)(uintptr_t)a->out_entry &&
+        (stage == IRShaderStageHull || stage == IRShaderStageDomain))
+        snprintf((char *)(uintptr_t)a->out_entry, MADEIRA_IR_ENTRY_MAX, "%s",
+                 stage == IRShaderStageHull ? "irconverter_hull_shader" : "irconverter_dxil_domain_shader");
     if (!a->out_entry || !*(const char *)(uintptr_t)a->out_entry) {
         status = MADEIRA_IR_EMPTY_ENTRY;
         goto done;

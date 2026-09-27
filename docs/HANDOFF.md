@@ -580,3 +580,18 @@ with position invariance, strict NaN/Inf and sampler LOD bias
 `msc-strict-nan`, `msc-sampler-lod-bias` = 0) for an A/B run; each switch
 change re-converts every shader once. If the artefacts are gone but FPS
 dropped, try `msc-strict-nan = 0` first (the likely costliest).
+
+### Build 199: DXIL tessellation (the missing water)
+Every run logged 12-16 "tessellation pipeline could not be built; returning a
+placeholder whose draws are skipped" -- all of them Ghost of Tsushima's WATER
+pipelines (`ls_Main_techWaterBlend`, `ps_Main_techWaterMain`,
+`ps_WaterHeight_techWaterHeight`): DXIL hull+domain shaders, and the runtime
+only had DXMT's emulation for DXBC ones. Build 199 builds them through the
+Metal Shader Converter's own tessellation emulation (docs/madeira-bcd.md). Not
+testable off the device: check the log for `DXIL tessellation: vs ...` (pipeline
+converted), `[winemetal] DXIL tessellation pipeline OK` (Metal accepted it) or
+`... REFUSED` / `Metal refused it` (with the reason), and `DXIL tessellation:
+N drawn` in the ml1050 lines. If water scenes misbehave (GPU fault, hang),
+`dxil-tess = 0` in madeira.cfg restores the placeholders. The workflow now
+FAILS when madeira_d3d12.dll does not build (it used to ship upstream's old
+tracked DLL and stay green).

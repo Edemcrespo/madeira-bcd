@@ -199,6 +199,29 @@ already did.
   and a shader the converter refuses answers the sizing call directly. Checked
   on the host against a mock converter (86 -> 45 conversions for 48 shaders
   cold, 0 warm, same outputs, torn entries rewritten, 8 threads).
+- DXIL tessellation through the converter's own emulation (`madeira_d3d12.c`
+  `mad_dtess_convert` / `mad_ts_draw`, `madeira_ir_unix.mm` hull/domain
+  reflection, `tools/patch-dxmt-dxil-tess.py`): a DXIL hull+domain pipeline is
+  built the way `IRRuntimeNewGeometryTessellationEmulationPipeline` builds it --
+  the vertex shader (converted with emulation and a separate stage-in
+  function) as the object function with `tessellationEnabled`, the hull
+  library's `irconverter_hull_shader` + `irconverter_tessellator` (function
+  constants `vertex_shader_output_size_fc`, `max_tessellation_factor_fc`)
+  linked into the object stage with the stage-in function, the domain
+  library's `irconverter_dxil_domain_shader` linked into the mesh stage, whose
+  function is the converter's passthrough geometry shader for the tessellator
+  output. Draws follow `IRRuntimeDraw[Indexed]PatchesTessellationEmulation`
+  (draw info at 5, draw params at 4, vertex-buffer table at 6, the top-level
+  argument buffer also at `kIRArgumentBufferHullDomainBindPoint` 3, 15360 bytes
+  of object threadgroup memory -- carried in the mesh draw's reserved words,
+  which the CI patch makes winemetal honour). Hull and domain reflection
+  (`IRShaderReflectionCopyHullInfo` / `CopyDomainInfo`) are checked against
+  each other as `IRRuntimeValidateTessellationPipeline` does; anything missing
+  or inconsistent keeps the old placeholder. Ghost of Tsushima draws its water
+  with 23 such pipelines (`ps_Main_techWaterMain` ...), which were
+  placeholders, so the water was missing. `dxil-tess = 0` in madeira.cfg turns
+  it off; log lines `DXIL tessellation: ...`, `[winemetal] DXIL tessellation
+  pipeline OK/REFUSED`, and `DXIL tessellation: N drawn` in the ml1050 report.
 - Shared Metal libraries (`mad_libshare_*`): identical metallib bytes with
   the same entry share one MTLLibrary/MTLFunction (each pipeline holds its own
   reference). Ghost of Tsushima made 30,370 libraries from ~11,400 distinct
