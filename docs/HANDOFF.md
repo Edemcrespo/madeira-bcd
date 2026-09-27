@@ -326,9 +326,15 @@ removed (201; run 200 was cancelled by 201's dispatch).
    under FEX (TSO on, half barriers). Ideas: fewer useResource calls per draw
    (up to 64 + heaps), MTLBinaryArchive for pipelines, attachment store
    traffic (~500 MB a frame, 300-420 MB never read again).
-4. **"Compiling shaders" on a warm cache**: still one small file per shader
-   (~30k opens through Wine) plus ~11k Metal library creations. 197 halved the
-   reads (one per hit); packing the cache into one mapped file is the next step.
+4. **"Compiling shaders" on a warm cache**: ~650-700 stages/s (build 190 log,
+   ~1.4 ms each) -- still one small file per shader plus ~11k Metal library
+   creations. 197 halved the reads (one per hit). Build 203's `pso time (...)`
+   lines split pipeline creation into conversion+cache, library creation and
+   the rest; decide from them. If library creation dominates: create a plain
+   pipeline's MTLLibrary/MTLFunction lazily in `mad_pso_realize` (the cache
+   file is the backing store; D3D12 lets the app free its bytecode, so keep
+   the cache key, never a pointer). If conversion dominates: one packed cache
+   file with an index instead of ~30k files.
 5. The launcher window stays dark until Enter is pressed.
 6. `DXGIFactory::EnumAdapterByLuid` not implemented (Streamline only);
    non-occlusion queries resolve to zero; `ResolveQueryData` into GPU-only
