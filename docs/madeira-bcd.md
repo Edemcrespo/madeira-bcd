@@ -216,6 +216,24 @@ already did.
   got garbage instead of 0,0 and looped until Metal timed the command buffer
   out (error 2) -- found by capturing the kernel's DXIL (below) and reading it.
   `MADEIRA_IR_NO_BOUNDS_CHECK=1` restores the old conversion.
+- Three more D3D12 guarantees from the converter (`madeira_ir_unix.mm`, MSC
+  compatibility flags, each on by default and switchable in madeira.cfg):
+  `msc-position-invariance` (the same vertex shader gives bit-identical
+  positions in every pipeline; Metal compiles a vertex function per pipeline
+  and may optimise the position math differently, so a depth-EQUAL pass after
+  a depth pre-pass loses pixels at random -- Ghost of Tsushima issues ~350
+  such draws a frame for cloth, moving objects and hair; DXVK and vkd3d-proton
+  make position invariant by default for the same reason),
+  `msc-strict-nan` (`IRCompatibilityFlagDisableNanInfOptimization`: MSC 4.0
+  turned on Metal's no-NaN/no-Inf arithmetic assumption by default, so
+  `isnan()` may fold to false and min/max lose their NaN rules; D3D12 keeps
+  IEEE semantics and Ghost of Tsushima clears its RG16F velocity target to NaN
+  every frame on purpose), and `msc-sampler-lod-bias` (the shader applies
+  `MipLODBias`, which the runtime already writes into each sampler
+  descriptor's metadata; Metal samplers have no bias of their own). The
+  start-up line `[madeira-ir] MSC 4.0.1 compatibility: ...` shows the state;
+  the PE shader cache keys on all three. Non-zero biases are logged
+  (`sampler with MipLODBias`, `static sampler sN with MipLODBias`).
 - GPU fault attribution (`mad_fault_*`, `tools/patch-dxmt-gpu-fault-info.py`):
   batch command buffers are created with
   `MTLCommandBufferErrorOptionEncoderExecutionStatus` (winemetal

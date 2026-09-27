@@ -8508,6 +8508,11 @@ static HRESULT STDMETHODCALLTYPE device_CreateRootSignature(ID3D12Device *This, 
                 if (!smp || !si.gpu_resource_id) continue;
                 memcpy(&bias_bits, &ss->mip_lod_bias, 4);
                 tab[i].gpu_va = si.gpu_resource_id; tab[i].texture_view_id = 0; tab[i].metadata = (UINT64)bias_bits;
+                if (ss->mip_lod_bias != 0.0f) {
+                    static LONG said;
+                    if (InterlockedIncrement(&said) <= 8)
+                        d3d12_log("[madeira-d3d12] static sampler s%u with MipLODBias %.3f\n", ss->shader_register, ss->mip_lod_bias);
+                }
                 mad_note_sampler(dd, smp); ok++;
             }
             mad_resident(dd, r->stab);
@@ -8967,6 +8972,11 @@ static void STDMETHODCALLTYPE device_CreateSampler(ID3D12Device *This,
     float bias = desc ? desc->MipLODBias : 0.0f;
     UINT32 bias_bits;
     memcpy(&bias_bits, &bias, sizeof bias_bits);
+    if (bias != 0.0f) {   /* madeira-bcd: shaders apply it since MSC's sampler-LOD-bias flag */
+        static LONG said;
+        if (InterlockedIncrement(&said) <= 8)
+            d3d12_log("[madeira-d3d12] sampler with MipLODBias %.3f (filter 0x%x)\n", bias, (unsigned)desc->Filter);
+    }
     e->gpu_va = si.gpu_resource_id;
     e->texture_view_id = 0;
     e->metadata = (UINT64)bias_bits;
@@ -9263,14 +9273,17 @@ static int mad_sc_init(void) {
             char v[16]; int nobc, agsrt;
             /* madeira-bcd: switches the converter service reads (madeira_ir_unix.mm,
              * madeira_ags.cpp); set in madeira.cfg, as an env.NAME export there, or
-             * in the environment. */
+             * in the environment. "msc" = position invariance, strict NaN/Inf,
+             * sampler LOD bias (the MSC compatibility flags). */
             n = GetEnvironmentVariableA("MADEIRA_IR_NO_BOUNDS_CHECK", v, sizeof v);
             nobc = (n && n < sizeof v && v[0] == '1') ||
                    (mad_cfg_str_pe("env.MADEIRA_IR_NO_BOUNDS_CHECK", v, sizeof v) && v[0] == '1');
             agsrt = GetEnvironmentVariableA("MADEIRA_AGS_ROUNDTRIP_ONLY", v, sizeof v) != 0 ||
                     mad_cfg_str_pe("env.MADEIRA_AGS_ROUNDTRIP_ONLY", v, sizeof v);
-            snprintf(g_sc_rt, sizeof g_sc_rt, "vsps-fill %d, no-bounds-check %d, ags-roundtrip %d",
-                     mad_cfg_int_pe("vsps-fill", 1) ? 1 : 0, nobc, agsrt);
+            snprintf(g_sc_rt, sizeof g_sc_rt, "vsps-fill %d, no-bounds-check %d, ags-roundtrip %d, msc %d%d%d",
+                     mad_cfg_int_pe("vsps-fill", 1) ? 1 : 0, nobc, agsrt,
+                     mad_cfg_int_pe("msc-position-invariance", 1) ? 1 : 0, mad_cfg_int_pe("msc-strict-nan", 1) ? 1 : 0,
+                     mad_cfg_int_pe("msc-sampler-lod-bias", 1) ? 1 : 0);
             mad_sc_feed(&h, g_sc_stamp, sizeof g_sc_stamp);
             mad_sc_feed(&h, g_sc_rt, sizeof g_sc_rt);
             n = GetEnvironmentVariableW(L"LOCALAPPDATA", base, MAX_PATH);

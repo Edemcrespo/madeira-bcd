@@ -565,3 +565,18 @@ cache. Log: `shader cache ON: ... identity 'madeira_d3d12 bc1 converter
 <16 hex>' (vsps-fill 1, no-bounds-check 0, ags-roundtrip 0; ...)`; the
 `shader cache: N hits, M misses` lines should show almost only hits on the
 second launch.
+
+### Build 198: converter flags for the remaining slight artefacts
+Build 194's remaining artefacts are "slight" (screenshot pending). Two MSC
+defaults differ from D3D12 in ways that produce exactly that kind of damage,
+and the build-194 capture shows the game depends on both: ~350 draws a frame
+redraw geometry with depth test EQUAL (D3D12 func 3, `dtest=1/func3/w0` in
+`[draw-dump]`: cloth, moving objects, hair) -- without position invariance
+Metal may compute those positions differently from the depth pre-pass --
+and the game clears its RG16F velocity target to NaN on purpose, while MSC
+4.0 optimises on the assumption that no value is NaN. Build 198 converts
+with position invariance, strict NaN/Inf and sampler LOD bias
+(docs/madeira-bcd.md). Each is a madeira.cfg switch (`msc-position-invariance`,
+`msc-strict-nan`, `msc-sampler-lod-bias` = 0) for an A/B run; each switch
+change re-converts every shader once. If the artefacts are gone but FPS
+dropped, try `msc-strict-nan = 0` first (the likely costliest).

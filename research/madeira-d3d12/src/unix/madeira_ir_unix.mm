@@ -1295,11 +1295,46 @@ extern "C" int madeira_ir_convert_impl(struct madeira_ir_convert_args *a) {
      * buffer, got garbage instead of 0,0, and looped until the GPU timed out
      * (MTLCommandBufferError 2) in every run. MADEIRA_IR_NO_BOUNDS_CHECK=1
      * restores the old conversion. */
+    /* madeira-bcd: three more D3D12 guarantees the converter only gives on
+     * request (each can be turned off in madeira.cfg for an A/B run; the PE
+     * shader cache keys on the same three values):
+     * - msc-position-invariance: the same vertex shader in two pipelines gives
+     *   bit-identical positions. Metal compiles a vertex function per pipeline
+     *   and may optimise the position math differently in each; a pass that
+     *   redraws geometry with depth test EQUAL after a depth pre-pass then
+     *   loses pixels at random. Ghost of Tsushima draws ~350 such calls a frame
+     *   (cloth, moving objects, hair). DXVK and vkd3d-proton declare position
+     *   invariant by default for the same reason.
+     * - msc-strict-nan: MSC 4.0 compiles with Metal's default assumption that
+     *   no operand is NaN or Inf ("NaN/Inf optimization", on by default since
+     *   4.0; before 4.0 converted IR was strict), so isnan() can fold to false
+     *   and min/max lose their NaN rules. D3D12 keeps IEEE semantics, and Ghost
+     *   of Tsushima clears its RG16F velocity target to NaN on purpose every
+     *   frame as a "not written" marker.
+     * - msc-sampler-lod-bias: apply D3D12_SAMPLER_DESC::MipLODBias. Metal
+     *   samplers have no LOD bias; the runtime already writes it into every
+     *   sampler descriptor's metadata (IRDescriptorTableSetSampler), but the
+     *   converted shader reads it only with this flag. */
     {
-        static int no_bc = -1;
+        static int no_bc = -1, extra = -1;
         if (no_bc < 0) { const char *v = getenv("MADEIRA_IR_NO_BOUNDS_CHECK"); no_bc = v && v[0] == '1'; }
+        if (extra < 0) {
+            int inv = madeira_cfg_int("msc-position-invariance", 1) ? 1 : 0;
+            int nan = madeira_cfg_int("msc-strict-nan", 1) ? 1 : 0;
+            int lod = madeira_cfg_int("msc-sampler-lod-bias", 1) ? 1 : 0;
+            int e = (inv ? (int)IRCompatibilityFlagPositionInvariance : 0) |
+                    (lod ? (int)IRCompatibilityFlagSamplerLODBias : 0);
+#if IR_VERSION_MAJOR >= 4
+            if (nan) e |= (int)IRCompatibilityFlagDisableNanInfOptimization;
+#endif
+            extra = e;   /* one store: another converting thread sees -1 or the whole value */
+            fprintf(stderr, "[madeira-ir] MSC %d.%d.%d compatibility: position invariance %s, strict NaN/Inf %s, "
+                            "sampler LOD bias %s, bounds check %s (madeira.cfg msc-position-invariance, "
+                            "msc-strict-nan, msc-sampler-lod-bias)\n", IR_VERSION_MAJOR, IR_VERSION_MINOR, IR_VERSION_PATCH,
+                    inv ? "on" : "off", nan ? "on" : "off", lod ? "on" : "off", no_bc ? "off" : "on");
+        }
         g_ir.IRCompilerSetCompatibilityFlags(compiler, (IRCompatibilityFlags)(IRCompatibilityFlagForceTextureArray |
-                                             (no_bc ? 0 : IRCompatibilityFlagBoundsCheck)));
+                                             (no_bc ? 0 : IRCompatibilityFlagBoundsCheck) | extra));
     }
     a->ret_len2 = 0; a->ret_vs_output_size = 0; a->ret_gs_max_prims = 0; a->ret_gs_payload = 0; a->ret_gs_passthrough = 0;
     if (a->gs_emulation) {   /* ml927 */
