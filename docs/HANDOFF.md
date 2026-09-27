@@ -140,7 +140,7 @@ seconds, next steps (in order of payoff):
 1. **Persist compiled pipelines across launches** with `MTLBinaryArchive`
    (or Metal 4 `MTL4Archive`): add winemetal calls to create/load an archive,
    add pipeline descriptors to it, serialize it next to the shader cache
-   (`%LOCALAPPDATA%\Madeira\ShaderCache\<build>\`), and pass it as
+   (`%LOCALAPPDATA%\Madeira\ShaderCache\<identity>\`), and pass it as
    `binaryArchives` when creating pipelines. Second launch then compiles
    nothing. Needs changes in `research/dxmt/src/winemetal` (done at build
    time through a `tools/patch-dxmt-*.py`, like the fault-info patch).
@@ -532,7 +532,7 @@ The C++ exception crash (VCRUNTIME140_1, AV READ of 0x16694) happened again
 at the end of the run -- the next main task. Owner has been told to raise the
 effort level for it.
 
-### C++ exception crash: ROOT CAUSE and build 195 fix
+### C++ exception crash: ROOT CAUSE and build 196 fix
 Analysed with Microsoft's 14.44 runtime (msvc-runtime wheel from PyPI, only
 for disassembly, never committed): the fault is `mov r12d,[rax+rbx]` at
 VCRUNTIME140_1+0x17b4 in FH4's FindHandler, rax = `_GetThrowImageBase()` = 0.
@@ -545,9 +545,23 @@ arm64ec-windows/msvcp140.dll sits a ThrowInfo whose CatchableTypeArray RVA is
 0x16694 -- the fault address -- type `std::runtime_error`; build 187's stale
 rax was exactly that ThrowInfo's pool alias. Wine code computes the pointer
 PC-relative in its JIT-pool copy, RtlPcToFileHeader(pool VA) returns 0.
-Build 195 patches RtlPcToFileHeader's pool copy to reverse-translate first
-(`[pc2fh]` log line at start-up). The same crash hits every game that mixes
+Build 196 patches RtlPcToFileHeader's pool copy to reverse-translate first
+(`[pc2fh]` log line at start-up). (Run 195 was the automatic build of the
+main push of build 194's commits -- same content as 194; the fix is 196.) The same crash hits every game that mixes
 Wine's msvcp140 with MS's vcruntime140_1 and catches a Wine-thrown exception.
 Verified offline against the shipped ntdll.dll with a harness (patch lands on
 RVA 0x35ea0, trampoline at RVA 0x8ffc0, idempotent).
 
+### Build 197: the shader cache survives new builds
+Every build used to start the device's shader cache from nothing (its key
+held the DLL's compile time), so each new build sat on "Compiling shaders"
+while ~29,000 stages converted again, and a DXIL miss ran the converter
+twice. Build 197 keys the cache by a converter identity the CI computes from
+everything that can change a conversion (docs/madeira-bcd.md, "Persistent
+shader cache") and converts a miss once. The first launch of 197 still
+converts everything (new identity); from then on a build that does not touch
+the converter, DXMT's airconv, LLVM or the MSC library starts with a warm
+cache. Log: `shader cache ON: ... identity 'madeira_d3d12 bc1 converter
+<16 hex>' (vsps-fill 1, no-bounds-check 0, ags-roundtrip 0; ...)`; the
+`shader cache: N hits, M misses` lines should show almost only hits on the
+second launch.

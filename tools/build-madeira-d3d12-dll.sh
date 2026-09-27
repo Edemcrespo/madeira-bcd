@@ -31,8 +31,30 @@ python3 "$SRC/gen_vtables.py" \
     "$R/toolchains/llvm-mingw-20260421-ucrt-macos-universal/generic-w64-mingw32/include/d3d12.h" \
     "$SRC/madeira_d3d12_stubs.h" > /dev/null
 
+# madeira-bcd: the shader cache's converter identity (madeira_d3d12.c,
+# MAD_SC_CONVERTER_ID) -- a hash of everything that shapes a conversion: the
+# service and the IR ABI, its build script, DXMT's DXBC compiler and parser as
+# patched for this build, LLVM's configuration, and Apple's converter library
+# and headers. A build that changes none of them keeps the device's shader cache
+# instead of converting every shader again. Runs after dxmt-ios and the MSC
+# staging steps, so it sees exactly what this build ships.
+scid_inputs() {
+    local f x
+    for f in research/madeira-d3d12/src/unix research/madeira-d3d12/src/madeira_ir_abi.h \
+             build/dxmt-ios/build.sh research/dxmt/src/airconv research/dxmt/libs \
+             toolchains/llvm-ios-build/include/llvm/Config/llvm-config.h \
+             app/Madeira/d3d12/libmetalirconverter.dylib ${MADEIRA_MSC_INCLUDE:+"$MADEIRA_MSC_INCLUDE"}; do
+        [ -e "$f" ] || { echo "absent ${f#"$R"/}"; continue; }
+        find "$f" -type f | LC_ALL=C sort | while read -r x; do
+            echo "$(shasum -a 256 < "$x" | cut -c1-64) ${x#"$R"/}"
+        done
+    done
+}
+SCID=$(cd "$R" && scid_inputs | shasum -a 256 | cut -c1-16)
+echo "  shader cache converter identity $SCID"
+
 echo "=== madeira_d3d12.dll (arm64ec) ==="
-"$MINGW/arm64ec-w64-mingw32-clang" -shared -O2 -Wall \
+"$MINGW/arm64ec-w64-mingw32-clang" -shared -O2 -Wall -DMAD_SC_CONVERTER_ID="\"$SCID\"" \
     -o "$OUT/madeira_d3d12.dll" "$SRC/madeira_d3d12.c" "$SRC/d3d12.def" \
     -I"$SRC" -I"$R/research/madeira-d3d12/src" -I"$R/research/dxmt/src/winemetal" \
     -L"$OUT" -lwinemetal -luuid -lole32 2> "$OUT/madeira_d3d12.err" \

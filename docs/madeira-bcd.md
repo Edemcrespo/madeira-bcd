@@ -175,13 +175,30 @@ already did.
 - Persistent shader cache (`madeira_d3d12.c` `mad_ir_convert_cached`): every
   DXIL/DXBC -> metallib conversion is keyed by a hash of all its inputs
   (bytecode, entry, root signature, static samplers, input layout, paired
-  stages, pixel flags, target, and the madeira_d3d12 build stamp) and stored
+  stages, pixel flags, target, and the converter identity) and stored
   with all the converter's outputs in
-  `%LOCALAPPDATA%\Madeira\ShaderCache\<build>\`. The second launch of a game
-  skips the converter for every shader it has seen; caches of other builds are
-  deleted in the background. Ghost of Tsushima's New Game converts ~29,000
+  `%LOCALAPPDATA%\Madeira\ShaderCache\<identity>\`. The second launch of a game
+  skips the converter for every shader it has seen; caches of other identities
+  are deleted in the background. Ghost of Tsushima's New Game converts ~29,000
   stages (several hundred MB on disk). `shader-cache = 0` in madeira.cfg
   turns it off.
+  The identity is `MAD_SC_CONVERTER_ID`, which `tools/build-madeira-d3d12-dll.sh`
+  computes from everything that shapes a conversion (the service in
+  `research/madeira-d3d12/src/unix` and the IR ABI, `build/dxmt-ios/build.sh`,
+  DXMT's airconv and DXBC parser as patched, LLVM's `llvm-config.h`, the iOS
+  `libmetalirconverter.dylib` and the MSC headers), plus the runtime switches
+  that change the output (`vsps-fill`, `MADEIRA_IR_NO_BOUNDS_CHECK`,
+  `MADEIRA_AGS_ROUNDTRIP_ONLY`); the start-up log line prints both. Before, the
+  identity was the DLL's `__DATE__ __TIME__`, so EVERY new build converted all
+  ~29,000 stages again. A local build without the define still gets a cache
+  per build. Also: the caller converts in two calls (size, then fill); a miss
+  used to run the DXIL converter twice and a hit read its file twice. Now a
+  missing sizing call converts once with room for every output, stores it and
+  hands the entry to the fill call on the same thread (`mad_sc_memo`); a
+  metallib larger than the 4 MB guess is converted again into its exact size,
+  and a shader the converter refuses answers the sizing call directly. Checked
+  on the host against a mock converter (86 -> 45 conversions for 48 shaders
+  cold, 0 warm, same outputs, torn entries rewritten, 8 threads).
 - Shared Metal libraries (`mad_libshare_*`): identical metallib bytes with
   the same entry share one MTLLibrary/MTLFunction (each pipeline holds its own
   reference). Ghost of Tsushima made 30,370 libraries from ~11,400 distinct

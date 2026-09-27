@@ -9130,10 +9130,10 @@ static obj_handle_t mad_convert_stage_opts(struct mad_device *d, struct mad_root
  * output the converter returns. A game's second launch then skips the
  * converter for every shader it saw before (Ghost of Tsushima converts ~29,000
  * stages at New Game; a PC takes 2-3 minutes for its own shader cache there).
- * The build stamp is part of the key and the path, so a different
- * madeira_d3d12 build never reads another build's output; older build
- * directories are deleted in the background. madeira.cfg shader-cache = 0
- * turns it off. */
+ * The converter's identity (below) is part of the key and the path, so an
+ * entry is never read back by a converter that could have produced something
+ * else; other identities' directories are deleted in the background.
+ * madeira.cfg shader-cache = 0 turns it off. */
 #define MAD_SC_MAGIC 0x3143534du   /* "MSC1" */
 struct mad_sc_hdr {
     UINT32 magic, hdr_size;
@@ -9151,7 +9151,22 @@ struct mad_sc_hdr {
 static int g_sc_on = -1;
 static WCHAR g_sc_root[MAX_PATH], g_sc_build[64], g_sc_dir[MAX_PATH];
 static volatile LONG g_sc_hit, g_sc_miss, g_sc_store;
-static const char g_sc_stamp[] = "madeira_d3d12 bc1 " __DATE__ " " __TIME__;   /* bc1: converted with IRCompatibilityFlagBoundsCheck */
+/* bc1: converted with IRCompatibilityFlagBoundsCheck. madeira-bcd: the CI
+ * build passes MAD_SC_CONVERTER_ID, a hash of everything that shapes a
+ * conversion (the service in research/madeira-d3d12/src/unix and the IR ABI,
+ * its build script, DXMT's DXBC compiler and parser as patched, LLVM's
+ * configuration, Apple's converter library and headers -- see
+ * tools/build-madeira-d3d12-dll.sh), so a new Madeira build keeps the device's
+ * cache unless the converter itself changed; before, every build started from
+ * nothing and Ghost of Tsushima converted ~29,000 stages again. A local build
+ * without it still gets its own cache per build. The runtime switches that
+ * change the converter's output join it in g_sc_rt. */
+#ifdef MAD_SC_CONVERTER_ID
+static const char g_sc_stamp[] = "madeira_d3d12 bc1 converter " MAD_SC_CONVERTER_ID;
+#else
+static const char g_sc_stamp[] = "madeira_d3d12 bc1 " __DATE__ " " __TIME__;
+#endif
+static char g_sc_rt[96];
 
 struct mad_sc_hash { UINT64 a, b; };
 static void mad_sc_feed(struct mad_sc_hash *h, const void *p, SIZE_T n) {
@@ -9180,6 +9195,7 @@ static void mad_sc_key(const struct madeira_ir_convert_args *a, UINT64 key[2]) {
     struct mad_sc_hash h = { 0xcbf29ce484222325ull, 0x84222325cbf29ce4ull };
     const struct madeira_ir_input_layout *lay = (const struct madeira_ir_input_layout *)(uintptr_t)a->layout;
     mad_sc_feed(&h, g_sc_stamp, sizeof g_sc_stamp);
+    mad_sc_feed(&h, g_sc_rt, sizeof g_sc_rt);
     mad_sc_feed_blob(&h, a->dxil, a->dxil_len);
     mad_sc_feed_str(&h, a->entry_point);
     mad_sc_feed_blob(&h, a->params, a->num_params * sizeof(struct madeira_ir_root_param));
@@ -9244,7 +9260,19 @@ static int mad_sc_init(void) {
         WCHAR base[MAX_PATH]; DWORD n; int on = mad_cfg_int_pe("shader-cache", 1) ? 1 : 0;
         if (on) {
             struct mad_sc_hash h = { 0xcbf29ce484222325ull, 0x84222325cbf29ce4ull };
+            char v[16]; int nobc, agsrt;
+            /* madeira-bcd: switches the converter service reads (madeira_ir_unix.mm,
+             * madeira_ags.cpp); set in madeira.cfg, as an env.NAME export there, or
+             * in the environment. */
+            n = GetEnvironmentVariableA("MADEIRA_IR_NO_BOUNDS_CHECK", v, sizeof v);
+            nobc = (n && n < sizeof v && v[0] == '1') ||
+                   (mad_cfg_str_pe("env.MADEIRA_IR_NO_BOUNDS_CHECK", v, sizeof v) && v[0] == '1');
+            agsrt = GetEnvironmentVariableA("MADEIRA_AGS_ROUNDTRIP_ONLY", v, sizeof v) != 0 ||
+                    mad_cfg_str_pe("env.MADEIRA_AGS_ROUNDTRIP_ONLY", v, sizeof v);
+            snprintf(g_sc_rt, sizeof g_sc_rt, "vsps-fill %d, no-bounds-check %d, ags-roundtrip %d",
+                     mad_cfg_int_pe("vsps-fill", 1) ? 1 : 0, nobc, agsrt);
             mad_sc_feed(&h, g_sc_stamp, sizeof g_sc_stamp);
+            mad_sc_feed(&h, g_sc_rt, sizeof g_sc_rt);
             n = GetEnvironmentVariableW(L"LOCALAPPDATA", base, MAX_PATH);
             if (!n || n >= MAX_PATH - 64) on = 0;
             else {
@@ -9256,7 +9284,7 @@ static int mad_sc_init(void) {
                 { HANDLE t = CreateThread(NULL, 0, mad_sc_prune, NULL, 0, NULL); if (t) CloseHandle(t); }
             }
         }
-        if (on) d3d12_log("[madeira-d3d12] shader cache ON: %ls (madeira.cfg shader-cache = 0 turns it off)\n", g_sc_dir);
+        if (on) d3d12_log("[madeira-d3d12] shader cache ON: %ls, identity '%s' (%s; madeira.cfg shader-cache = 0 turns it off)\n", g_sc_dir, g_sc_stamp, g_sc_rt);
         else d3d12_log("[madeira-d3d12] shader cache off\n");
         g_sc_on = on;
     }
@@ -9276,75 +9304,119 @@ static void mad_sc_stats(void) {
 }
 #define MAD_SC_MIN(x, y) ((x) < (y) ? (x) : (y))
 
-/* A hit fills every output as MadeiraIRConvert would; a sizing call (no
- * out_buf) gets BUFFER_TOO_SMALL with the length. Returns 1 on a hit. */
-static int mad_sc_load(struct madeira_ir_convert_args *a, const UINT64 key[2]) {
-    WCHAR path[MAX_PATH]; HANDLE f; LARGE_INTEGER sz; unsigned char *blob, *q; DWORD got;
-    struct mad_sc_hdr h; int ok = 0;
+/* madeira-bcd: the caller converts in two calls -- a sizing call (no out_buf)
+ * and a fill call -- so one conversion used to read its cache entry twice, and
+ * on a miss the DXIL converter COMPILED twice (the sizing call compiled and
+ * threw the result away). The last entry a sizing call loaded or produced is
+ * kept per thread and handed to the fill call that follows it. */
+struct mad_sc_memo { UINT64 key[2]; unsigned char *blob; SIZE_T size; int fresh; };
+static LONG g_sc_tls = -1;   /* a TLS index; -1 until allocated */
+static struct mad_sc_memo *mad_sc_memo_get(void) {
+    struct mad_sc_memo *m;
+    LONG idx = g_sc_tls;
+    if (idx < 0) {
+        DWORD n = TlsAlloc();
+        if (n == TLS_OUT_OF_INDEXES) return NULL;
+        idx = InterlockedCompareExchange(&g_sc_tls, (LONG)n, -1);
+        if (idx >= 0) TlsFree(n); else idx = (LONG)n;
+    }
+    m = TlsGetValue((DWORD)idx);
+    if (!m && (m = calloc(1, sizeof *m))) TlsSetValue((DWORD)idx, m);
+    return m;
+}
+static void mad_sc_memo_set(struct mad_sc_memo *m, const UINT64 key[2], unsigned char *blob, SIZE_T size, int fresh) {
+    if (m->blob && m->blob != blob) free(m->blob);
+    m->key[0] = key[0]; m->key[1] = key[1]; m->blob = blob; m->size = size; m->fresh = fresh;
+}
+static int mad_sc_read_file(const UINT64 key[2], unsigned char **blob_out, SIZE_T *size_out) {
+    WCHAR path[MAX_PATH]; HANDLE f; LARGE_INTEGER sz; unsigned char *blob; DWORD got; int ok = 0;
     mad_sc_path(key, path, 0);
     f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, 0, NULL);
     if (f == INVALID_HANDLE_VALUE) return 0;
-    if (!GetFileSizeEx(f, &sz) || sz.QuadPart < (LONGLONG)sizeof h || sz.QuadPart > (256ll << 20)) { CloseHandle(f); return 0; }
-    blob = malloc((SIZE_T)sz.QuadPart);
-    if (!blob) { CloseHandle(f); return 0; }
-    if (ReadFile(f, blob, (DWORD)sz.QuadPart, &got, NULL) && got == (DWORD)sz.QuadPart) {
-        memcpy(&h, blob, sizeof h);
-        if (h.magic == MAD_SC_MAGIC && h.hdr_size == sizeof h && h.key[0] == key[0] && h.key[1] == key[1] &&
-            h.ret_status == MADEIRA_IR_OK && h.entry_len <= MADEIRA_IR_ENTRY_MAX &&
-            sizeof h + h.ret_len + h.ret_len2 + h.entry_len
-              + (UINT64)h.n_vsin * sizeof(struct madeira_ir_vs_input)
-              + (UINT64)h.n_loc * sizeof(struct madeira_ir_loc)
-              + (UINT64)(h.n_air + h.n_air2) * sizeof(struct madeira_ir_air_range) == (UINT64)sz.QuadPart &&
-            (!a->out_vs_inputs || MAD_SC_MIN(h.ret_vs_input_count, a->vs_input_cap) <= h.n_vsin) &&
-            (!a->out_locs || MAD_SC_MIN(h.ret_loc_count, a->loc_cap) <= h.n_loc) &&
-            (!a->out_air_ranges || MAD_SC_MIN(h.ret_air_nranges, a->air_range_cap) <= h.n_air) &&
-            (!a->out_air_ranges2 || MAD_SC_MIN(h.ret_air_nranges2, a->air_range_cap2) <= h.n_air2) &&
-            (!a->out_buf2 || h.ret_len2 <= a->out_cap2)) {
-            q = blob + sizeof h;
-            a->ret_len = h.ret_len; a->ret_len2 = h.ret_len2;
-            a->ret_stage = h.ret_stage; a->ret_error_code = h.ret_error_code;
-            a->ret_vs_input_count = h.ret_vs_input_count; a->ret_loc_count = h.ret_loc_count;
-            memcpy(a->ret_tg_size, h.ret_tg_size, sizeof a->ret_tg_size);
-            a->ret_vs_output_size = h.ret_vs_output_size; a->ret_gs_max_prims = h.ret_gs_max_prims;
-            a->ret_gs_payload = h.ret_gs_payload; a->ret_gs_passthrough = h.ret_gs_passthrough;
-            a->ret_air_nranges = h.ret_air_nranges; a->ret_backend = h.ret_backend;
-            a->ret_cb_table_bind = h.ret_cb_table_bind; a->ret_arg_table_bind = h.ret_arg_table_bind;
-            a->ret_arg_qwords = h.ret_arg_qwords; a->ret_air_slot_mask = h.ret_air_slot_mask;
-            a->ret_threads_per_patch = h.ret_threads_per_patch; a->ret_tess_out_prim = h.ret_tess_out_prim;
-            a->ret_max_potential_factor = h.ret_max_potential_factor; a->ret_air_nranges2 = h.ret_air_nranges2;
-            a->ret_cb_table_bind2 = h.ret_cb_table_bind2; a->ret_arg_table_bind2 = h.ret_arg_table_bind2;
-            a->ret_arg_qwords2 = h.ret_arg_qwords2;
-            memcpy(a->ret_note, h.note, sizeof a->ret_note);
-            if (a->out_buf && a->out_cap >= h.ret_len) {
-                memcpy((void *)(uintptr_t)a->out_buf, q, (SIZE_T)h.ret_len);
-                a->ret_status = MADEIRA_IR_OK;
-            } else a->ret_status = MADEIRA_IR_BUFFER_TOO_SMALL;
-            q += h.ret_len;
-            if (a->out_buf2 && h.ret_len2) memcpy((void *)(uintptr_t)a->out_buf2, q, (SIZE_T)h.ret_len2);
-            q += h.ret_len2;
-            if (a->out_entry && h.entry_len) memcpy((void *)(uintptr_t)a->out_entry, q, h.entry_len);
-            q += h.entry_len;
-            if (a->out_vs_inputs)
-                memcpy((void *)(uintptr_t)a->out_vs_inputs, q, MAD_SC_MIN(h.n_vsin, a->vs_input_cap) * sizeof(struct madeira_ir_vs_input));
-            q += (SIZE_T)h.n_vsin * sizeof(struct madeira_ir_vs_input);
-            if (a->out_locs)
-                memcpy((void *)(uintptr_t)a->out_locs, q, MAD_SC_MIN(h.n_loc, a->loc_cap) * sizeof(struct madeira_ir_loc));
-            q += (SIZE_T)h.n_loc * sizeof(struct madeira_ir_loc);
-            if (a->out_air_ranges)
-                memcpy((void *)(uintptr_t)a->out_air_ranges, q, MAD_SC_MIN(h.n_air, a->air_range_cap) * sizeof(struct madeira_ir_air_range));
-            q += (SIZE_T)h.n_air * sizeof(struct madeira_ir_air_range);
-            if (a->out_air_ranges2)
-                memcpy((void *)(uintptr_t)a->out_air_ranges2, q, MAD_SC_MIN(h.n_air2, a->air_range_cap2) * sizeof(struct madeira_ir_air_range));
-            ok = 1;
-        }
+    if (GetFileSizeEx(f, &sz) && sz.QuadPart >= (LONGLONG)sizeof(struct mad_sc_hdr) && sz.QuadPart <= (256ll << 20) &&
+        (blob = malloc((SIZE_T)sz.QuadPart))) {
+        if (ReadFile(f, blob, (DWORD)sz.QuadPart, &got, NULL) && got == (DWORD)sz.QuadPart) {
+            *blob_out = blob; *size_out = (SIZE_T)sz.QuadPart; ok = 1;
+        } else free(blob);
     }
-    free(blob);
     CloseHandle(f);
     return ok;
 }
-static void mad_sc_save(const struct madeira_ir_convert_args *a, const UINT64 key[2]) {
-    struct mad_sc_hdr h; WCHAR path[MAX_PATH], tmp[MAX_PATH]; HANDLE f; DWORD put;
-    UINT32 entry_len = 0; unsigned char *blob, *q; SIZE_T total;
+/* Fills every output as MadeiraIRConvert would from a stored entry; a sizing
+ * call (no out_buf) gets BUFFER_TOO_SMALL with the length. Returns 1 if the
+ * entry is valid for this call. */
+static int mad_sc_apply(struct madeira_ir_convert_args *a, const UINT64 key[2], const unsigned char *blob, SIZE_T size) {
+    struct mad_sc_hdr h; const unsigned char *q;
+    memcpy(&h, blob, sizeof h);
+    if (!(h.magic == MAD_SC_MAGIC && h.hdr_size == sizeof h && h.key[0] == key[0] && h.key[1] == key[1] &&
+          h.ret_status == MADEIRA_IR_OK && h.entry_len <= MADEIRA_IR_ENTRY_MAX &&
+          sizeof h + h.ret_len + h.ret_len2 + h.entry_len
+            + (UINT64)h.n_vsin * sizeof(struct madeira_ir_vs_input)
+            + (UINT64)h.n_loc * sizeof(struct madeira_ir_loc)
+            + (UINT64)(h.n_air + h.n_air2) * sizeof(struct madeira_ir_air_range) == (UINT64)size &&
+          (!a->out_vs_inputs || MAD_SC_MIN(h.ret_vs_input_count, a->vs_input_cap) <= h.n_vsin) &&
+          (!a->out_locs || MAD_SC_MIN(h.ret_loc_count, a->loc_cap) <= h.n_loc) &&
+          (!a->out_air_ranges || MAD_SC_MIN(h.ret_air_nranges, a->air_range_cap) <= h.n_air) &&
+          (!a->out_air_ranges2 || MAD_SC_MIN(h.ret_air_nranges2, a->air_range_cap2) <= h.n_air2) &&
+          (!a->out_buf2 || h.ret_len2 <= a->out_cap2)))
+        return 0;
+    q = blob + sizeof h;
+    a->ret_len = h.ret_len; a->ret_len2 = h.ret_len2;
+    a->ret_stage = h.ret_stage; a->ret_error_code = h.ret_error_code;
+    a->ret_vs_input_count = h.ret_vs_input_count; a->ret_loc_count = h.ret_loc_count;
+    memcpy(a->ret_tg_size, h.ret_tg_size, sizeof a->ret_tg_size);
+    a->ret_vs_output_size = h.ret_vs_output_size; a->ret_gs_max_prims = h.ret_gs_max_prims;
+    a->ret_gs_payload = h.ret_gs_payload; a->ret_gs_passthrough = h.ret_gs_passthrough;
+    a->ret_air_nranges = h.ret_air_nranges; a->ret_backend = h.ret_backend;
+    a->ret_cb_table_bind = h.ret_cb_table_bind; a->ret_arg_table_bind = h.ret_arg_table_bind;
+    a->ret_arg_qwords = h.ret_arg_qwords; a->ret_air_slot_mask = h.ret_air_slot_mask;
+    a->ret_threads_per_patch = h.ret_threads_per_patch; a->ret_tess_out_prim = h.ret_tess_out_prim;
+    a->ret_max_potential_factor = h.ret_max_potential_factor; a->ret_air_nranges2 = h.ret_air_nranges2;
+    a->ret_cb_table_bind2 = h.ret_cb_table_bind2; a->ret_arg_table_bind2 = h.ret_arg_table_bind2;
+    a->ret_arg_qwords2 = h.ret_arg_qwords2;
+    memcpy(a->ret_note, h.note, sizeof a->ret_note);
+    if (a->out_buf && a->out_cap >= h.ret_len) {
+        memcpy((void *)(uintptr_t)a->out_buf, q, (SIZE_T)h.ret_len);
+        a->ret_status = MADEIRA_IR_OK;
+    } else a->ret_status = MADEIRA_IR_BUFFER_TOO_SMALL;
+    q += h.ret_len;
+    if (a->out_buf2 && h.ret_len2) memcpy((void *)(uintptr_t)a->out_buf2, q, (SIZE_T)h.ret_len2);
+    q += h.ret_len2;
+    if (a->out_entry && h.entry_len) memcpy((void *)(uintptr_t)a->out_entry, q, h.entry_len);
+    q += h.entry_len;
+    if (a->out_vs_inputs)
+        memcpy((void *)(uintptr_t)a->out_vs_inputs, q, MAD_SC_MIN(h.n_vsin, a->vs_input_cap) * sizeof(struct madeira_ir_vs_input));
+    q += (SIZE_T)h.n_vsin * sizeof(struct madeira_ir_vs_input);
+    if (a->out_locs)
+        memcpy((void *)(uintptr_t)a->out_locs, q, MAD_SC_MIN(h.n_loc, a->loc_cap) * sizeof(struct madeira_ir_loc));
+    q += (SIZE_T)h.n_loc * sizeof(struct madeira_ir_loc);
+    if (a->out_air_ranges)
+        memcpy((void *)(uintptr_t)a->out_air_ranges, q, MAD_SC_MIN(h.n_air, a->air_range_cap) * sizeof(struct madeira_ir_air_range));
+    q += (SIZE_T)h.n_air * sizeof(struct madeira_ir_air_range);
+    if (a->out_air_ranges2)
+        memcpy((void *)(uintptr_t)a->out_air_ranges2, q, MAD_SC_MIN(h.n_air2, a->air_range_cap2) * sizeof(struct madeira_ir_air_range));
+    return 1;
+}
+/* Returns 1 on a hit; *fresh = the entry was produced by this thread's sizing
+ * call a moment ago (a miss, not a hit, for the statistics). */
+static int mad_sc_load(struct madeira_ir_convert_args *a, const UINT64 key[2], int *fresh) {
+    struct mad_sc_memo *m = mad_sc_memo_get();
+    unsigned char *blob = NULL; SIZE_T size = 0; int from_memo = 0, ok;
+    *fresh = 0;
+    if (m && m->blob && m->key[0] == key[0] && m->key[1] == key[1]) { blob = m->blob; size = m->size; from_memo = 1; *fresh = m->fresh; }
+    else if (!mad_sc_read_file(key, &blob, &size)) return 0;
+    ok = mad_sc_apply(a, key, blob, size);
+    if (ok && !a->out_buf && m) {   /* a sizing call: the fill call comes next on this thread */
+        if (!from_memo) mad_sc_memo_set(m, key, blob, size, 0);
+        return 1;
+    }
+    if (from_memo) { m->blob = NULL; m->size = 0; }
+    free(blob);
+    return ok;
+}
+/* Every output of a conversion, in the file layout. NULL on failure. */
+static unsigned char *mad_sc_build_blob(const struct madeira_ir_convert_args *a, const UINT64 key[2], SIZE_T *total_out) {
+    struct mad_sc_hdr h; UINT32 entry_len = 0; unsigned char *blob, *q; SIZE_T total;
     if (a->out_entry) entry_len = (UINT32)strnlen((const char *)(uintptr_t)a->out_entry, MADEIRA_IR_ENTRY_MAX - 1) + 1;
     memset(&h, 0, sizeof h);
     h.magic = MAD_SC_MAGIC; h.hdr_size = sizeof h; h.key[0] = key[0]; h.key[1] = key[1];
@@ -9370,7 +9442,7 @@ static void mad_sc_save(const struct madeira_ir_convert_args *a, const UINT64 ke
     total = sizeof h + (SIZE_T)h.ret_len + (SIZE_T)h.ret_len2 + entry_len
           + (SIZE_T)h.n_vsin * sizeof(struct madeira_ir_vs_input) + (SIZE_T)h.n_loc * sizeof(struct madeira_ir_loc)
           + (SIZE_T)(h.n_air + h.n_air2) * sizeof(struct madeira_ir_air_range);
-    if (!(blob = malloc(total))) return;
+    if (!(blob = malloc(total))) return NULL;
     q = blob; memcpy(q, &h, sizeof h); q += sizeof h;
     memcpy(q, (const void *)(uintptr_t)a->out_buf, (SIZE_T)h.ret_len); q += h.ret_len;
     if (h.ret_len2) { memcpy(q, (const void *)(uintptr_t)a->out_buf2, (SIZE_T)h.ret_len2); q += h.ret_len2; }
@@ -9379,6 +9451,11 @@ static void mad_sc_save(const struct madeira_ir_convert_args *a, const UINT64 ke
     if (h.n_loc) { memcpy(q, (const void *)(uintptr_t)a->out_locs, h.n_loc * sizeof(struct madeira_ir_loc)); q += h.n_loc * sizeof(struct madeira_ir_loc); }
     if (h.n_air) { memcpy(q, (const void *)(uintptr_t)a->out_air_ranges, h.n_air * sizeof(struct madeira_ir_air_range)); q += h.n_air * sizeof(struct madeira_ir_air_range); }
     if (h.n_air2) { memcpy(q, (const void *)(uintptr_t)a->out_air_ranges2, h.n_air2 * sizeof(struct madeira_ir_air_range)); }
+    *total_out = total;
+    return blob;
+}
+static void mad_sc_write_file(const UINT64 key[2], const unsigned char *blob, SIZE_T total) {
+    WCHAR path[MAX_PATH], tmp[MAX_PATH]; HANDLE f; DWORD put;
     mad_sc_path(key, path, 1);
     _snwprintf(tmp, MAX_PATH, L"%ls.%lx.tmp", path, GetCurrentThreadId());
     f = CreateFileW(tmp, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
@@ -9388,15 +9465,78 @@ static void mad_sc_save(const struct madeira_ir_convert_args *a, const UINT64 ke
         if (w && MoveFileExW(tmp, path, MOVEFILE_REPLACE_EXISTING)) InterlockedIncrement(&g_sc_store);
         else DeleteFileW(tmp);
     }
+}
+static void mad_sc_save(const struct madeira_ir_convert_args *a, const UINT64 key[2]) {
+    SIZE_T total; unsigned char *blob = mad_sc_build_blob(a, key, &total);
+    if (!blob) return;
+    mad_sc_write_file(key, blob, total);
     free(blob);
 }
+/* A sizing call that misses: convert ONCE, with room for every output the fill
+ * call will ask for (the caller's own range arrays and entry buffer, plus
+ * temporary ones for the metallib, vertex inputs, resource locations and the
+ * stage-in library), store it, and keep it for the fill call. Returns 1 when
+ * the entry is ready, -1 when the converter refused the shader (a then carries
+ * its answer, as the sizing call's own conversion would have), 0 to take the
+ * plain path. */
+#define MAD_SC_VSIN_CAP 64
+static int mad_sc_convert_full(struct madeira_ir_convert_args *a, const UINT64 key[2]) {
+    struct madeira_ir_convert_args b = *a;
+    SIZE_T cap = (SIZE_T)(4u << 20) + (SIZE_T)a->dxil_len * 4, total = 0;
+    unsigned char *buf = malloc(cap), *buf2 = a->layout ? malloc(256u << 10) : NULL, *blob = NULL;
+    struct madeira_ir_vs_input *vsin = calloc(MAD_SC_VSIN_CAP, sizeof *vsin);
+    struct madeira_ir_loc *locs = calloc(MAD_LOC_MAX, sizeof *locs);
+    char entry[MADEIRA_IR_ENTRY_MAX];
+    struct mad_sc_memo *m = mad_sc_memo_get();
+    int ok = 0;
+    if (!m || !buf || !vsin || !locs || (a->layout && !buf2)) goto done;
+    b.out_buf = (uint64_t)(uintptr_t)buf; b.out_cap = cap;
+    b.out_vs_inputs = (uint64_t)(uintptr_t)vsin; b.vs_input_cap = MAD_SC_VSIN_CAP;
+    b.out_locs = (uint64_t)(uintptr_t)locs; b.loc_cap = MAD_LOC_MAX;
+    if (!b.out_entry) b.out_entry = (uint64_t)(uintptr_t)entry;
+    *(char *)(uintptr_t)b.out_entry = 0;   /* the converter only writes a name it found */
+    if (buf2) { b.out_buf2 = (uint64_t)(uintptr_t)buf2; b.out_cap2 = 256u << 10; }
+    MadeiraIRConvert(&b);
+    if (b.ret_status == MADEIRA_IR_BUFFER_TOO_SMALL && b.ret_len > cap && b.ret_len <= (256u << 20)) {
+        free(buf);   /* bigger than the guess: once more into the exact size */
+        cap = (SIZE_T)b.ret_len;
+        if (!(buf = malloc(cap))) goto done;
+        b.out_buf = (uint64_t)(uintptr_t)buf; b.out_cap = cap;
+        MadeiraIRConvert(&b);
+    }
+    if (b.ret_status != MADEIRA_IR_OK) {
+        if (b.ret_status != MADEIRA_IR_BUFFER_TOO_SMALL) {
+            struct madeira_ir_convert_args keep = *a;
+            *a = b;
+            a->out_buf = keep.out_buf; a->out_cap = keep.out_cap;
+            a->out_vs_inputs = keep.out_vs_inputs; a->vs_input_cap = keep.vs_input_cap;
+            a->out_locs = keep.out_locs; a->loc_cap = keep.loc_cap;
+            a->out_entry = keep.out_entry; a->out_buf2 = keep.out_buf2; a->out_cap2 = keep.out_cap2;
+            ok = -1;
+        }
+        goto done;
+    }
+    if (!b.ret_len || b.ret_len > cap || !(blob = mad_sc_build_blob(&b, key, &total))) goto done;
+    mad_sc_write_file(key, blob, total);
+    mad_sc_memo_set(m, key, blob, total, 1);
+    InterlockedIncrement(&g_sc_miss);
+    mad_sc_stats();
+    ok = 1;
+done:
+    free(buf); free(buf2); free(vsin); free(locs);
+    return ok;
+}
 static void mad_ir_convert_cached(struct madeira_ir_convert_args *a) {
-    UINT64 key[2];
+    UINT64 key[2]; int fresh = 0;
     if (!mad_sc_init()) { MadeiraIRConvert(a); return; }
     mad_sc_key(a, key);
-    if (mad_sc_load(a, key)) {
-        if (a->out_buf) { InterlockedIncrement(&g_sc_hit); mad_sc_stats(); }
+    if (mad_sc_load(a, key, &fresh)) {
+        if (a->out_buf && !fresh) { InterlockedIncrement(&g_sc_hit); mad_sc_stats(); }
         return;
+    }
+    if (!a->out_buf) {
+        int r = mad_sc_convert_full(a, key);
+        if (r < 0 || (r > 0 && mad_sc_load(a, key, &fresh))) return;
     }
     MadeiraIRConvert(a);
     if (a->out_buf && a->ret_status == MADEIRA_IR_OK && a->ret_len <= a->out_cap) {
