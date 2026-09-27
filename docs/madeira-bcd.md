@@ -369,7 +369,13 @@ already did.
   madeira-log.txt, so every writer's lines land in both and the next
   launch's rotation leaves the finished run under its own name. The newest
   40 are kept.
-- Game Mode (`GCSupportsGameMode`, games category) in Info.plist.
+- Game Mode (`GCSupportsGameMode`, `LSSupportsGameMode`, games category) in
+  Info.plist; `LSSupportsGameMode` silences the Metal HUD's "key not found"
+  warning.
+- Metal Performance HUD insights off by default (`MadeiraApp.init`,
+  `MTL_HUD_INSIGHTS_ENABLED=0` unless already set): the HUD keeps its metrics
+  panel but no longer stacks shader-compile / render-pass / blit notes over the
+  game. `env.MTL_HUD_INSIGHTS_ENABLED = 1` in madeira.cfg brings them back.
 - Settings > Experimental > Storage-backed memory writes `swap-mb = 3072` to
   `Documents/madeira.cfg`, which turns on upstream's file-backed guest data tier
   (virtual_ios.c ml1077). Measured on an iPhone 17 Pro Max / iOS 27.0 with this
