@@ -293,6 +293,12 @@ already did.
   so once that band filled it got STATUS_NO_MEMORY (Ghost of Tsushima: 1 MB,
   then the game stopped itself). The band above the windows is now tried
   before relaxing or failing (`[wow-window] ... placed above them`).
+- The unix DXBC shader cache (`madeira_ir_unix.mm`, `Documents/shadercache/
+  *.mdsc`) binds every entry to its build (ml1020), so each build wrote a fresh
+  set that nothing removed. The first cache access of a process now compares
+  `shadercache/.build` with the build stamp and, when it differs, removes the
+  entries written before the process started in a background thread (`DXBC
+  shader cache: removed N entries of earlier builds`).
 - Compute-shader dumps are opt-in (`madeira_d3d12.c` `mad_cs_dump_on`,
   madeira.cfg `cs-dump = 1`): ml931 wrote the first 400 compute shaders of
   every launch to `C:\madeira-cs\cs_<pipeline pointer>_<size>.dxil`, and the

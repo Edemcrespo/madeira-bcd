@@ -18,6 +18,8 @@
 #include <dlfcn.h>
 #include "../../../../build/madeira_cfg.h"   /* ml1095: one config file */
 #include <sys/stat.h>
+#include <dirent.h>
+#include <time.h>
 #include <fcntl.h>
 #include <errno.h>
 #include <pthread.h>
@@ -320,13 +322,67 @@ static void mad_sc_hash_add(uint64_t *h, const void *p, size_t n)
     for (size_t i = 0; i < n; i++) { *h ^= b[i]; *h *= 1099511628211ull; }
 }
 
+/* madeira-bcd: the key binds every entry to THIS BUILD (ml1020), so each new
+ * build wrote a fresh set and the earlier ones were never read again -- nor
+ * deleted. The first cache access of a process compares
+ * Documents/shadercache/.build with this build's stamp; when it differs, a
+ * background thread removes the entries (and torn .tmp files) written before
+ * the process started, then records the stamp. */
+static time_t g_sc_prune_before;
+static void *mad_sc_prune_thread(void *arg)
+{
+    char *dir = (char *)arg, path[1400];
+    DIR *d = opendir(dir);
+    struct dirent *e;
+    struct stat st;
+    unsigned n = 0;
+    if (d) {
+        while ((e = readdir(d))) {
+            size_t l = strlen(e->d_name);
+            if (!((l > 5 && !strcmp(e->d_name + l - 5, ".mdsc")) || strstr(e->d_name, ".mdsc.tmp"))) continue;
+            if (snprintf(path, sizeof path, "%s/%s", dir, e->d_name) >= (int)sizeof path) continue;
+            if (stat(path, &st) || st.st_mtime >= g_sc_prune_before) continue;   /* this build's own */
+            if (!unlink(path)) n++;
+        }
+        closedir(d);
+        if (snprintf(path, sizeof path, "%s/.build", dir) < (int)sizeof path) {
+            int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (fd >= 0) { const char *stamp = __DATE__ " " __TIME__; ssize_t w = write(fd, stamp, strlen(stamp)); (void)w; close(fd); }
+        }
+    }
+    if (n) fprintf(stderr, "[madeira-ir] DXBC shader cache: removed %u entries of earlier builds\n", n);
+    free(dir);
+    return NULL;
+}
+static void mad_sc_prune_start(void)
+{
+    const char *docs = getenv("MADEIRA_DOCS_DIR"), *stamp = __DATE__ " " __TIME__;
+    char dir[1100], marker[1200], old[64];
+    ssize_t n = -1;
+    int fd;
+    pthread_t t;
+    if (!docs || !*docs) return;
+    if (snprintf(dir, sizeof dir, "%s/shadercache", docs) >= (int)sizeof dir) return;
+    if (snprintf(marker, sizeof marker, "%s/.build", dir) >= (int)sizeof marker) return;
+    fd = open(marker, O_RDONLY);
+    if (fd >= 0) { n = read(fd, old, sizeof old - 1); close(fd); }
+    old[n > 0 ? n : 0] = 0;
+    if (!strcmp(old, stamp)) return;
+    g_sc_prune_before = time(NULL) - 2;
+    char *arg = strdup(dir);
+    if (arg && !pthread_create(&t, NULL, mad_sc_prune_thread, arg)) pthread_detach(t);
+    else free(arg);
+}
+
 /* Returns 0 if the cache directory is unavailable. */
 static int mad_sc_path(uint64_t key, char *out, size_t cap)
 {
+    static pthread_once_t prune_once = PTHREAD_ONCE_INIT;
     const char *docs = getenv( "MADEIRA_DOCS_DIR" );
     if (!docs || !*docs) return 0;
     if (snprintf(out, cap, "%s/shadercache", docs) >= (int)cap) return 0;
     mkdir(out, 0755);   /* harmless if it exists */
+    pthread_once(&prune_once, mad_sc_prune_start);   /* madeira-bcd */
     if (snprintf(out, cap, "%s/shadercache/%016llx.mdsc", docs,
                  (unsigned long long)key) >= (int)cap) return 0;
     return 1;
