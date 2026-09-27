@@ -479,10 +479,25 @@ static void mad_xp_role(char role) {   /* tell the probe which thread this is (u
     memset(&a, 0, sizeof a); a.op = 4; a.len = (UINT64)(unsigned char)role; a.ptr = me; MadeiraCtl(&a);
 }
 static LONG64 mad_qpc(void) { LARGE_INTEGER t; QueryPerformanceCounter(&t); return t.QuadPart; }
+/* madeira-bcd: where pipeline creation time goes -- the "Compiling shaders"
+ * screen and the stalls at first draw. QPC ticks, summed over all threads. */
+static volatile LONG64 g_pt_gfx, g_pt_cs, g_pt_conv, g_pt_lib, g_pt_rs, g_pt_realize;
+static volatile LONG g_pn_gfx, g_pn_cs, g_pn_lib, g_pn_rs, g_pn_realize;
+static void mad_pso_time_report(const char *why) {
+    LARGE_INTEGER f; double ms;
+    QueryPerformanceFrequency(&f);
+    ms = f.QuadPart ? 1000.0 / (double)f.QuadPart : 0.0;
+    d3d12_log("[madeira-d3d12] pso time (%s): %ld graphics pipelines %.0f ms, %ld compute %.0f ms; inside them shader conversion+cache "
+              "%.0f ms, %ld new Metal libraries %.0f ms; %ld root signatures %.0f ms; %ld lazy pipelines built at first draw %.0f ms\n",
+              why, g_pn_gfx, (double)g_pt_gfx * ms, g_pn_cs, (double)g_pt_cs * ms, (double)g_pt_conv * ms, g_pn_lib,
+              (double)g_pt_lib * ms, g_pn_rs, (double)g_pt_rs * ms, g_pn_realize, (double)g_pt_realize * ms);
+}
 static LONG g_perf_ecl, g_perf_signals, g_perf_waits, g_perf_polls, g_perf_qwait_sleeps; static LONGLONG g_perf_wait_ticks, g_perf_sig_lat_ticks; static LONG g_perf_sig_lat_n;
 #define MAD_SKIP(e_) (mad_skip_at(__LINE__), (e_)->skipped++)
+static void mad_pso_time_report(const char *why);
 static void mad_skip_report(void) {
     char buf[1400]; int n = 0; unsigned i;
+    mad_pso_time_report("periodic");   /* madeira-bcd */
     for (i = 0; i < 48 && g_skip_line[i].line; i++)
         n += snprintf(buf + n, sizeof buf - n, " L%ld=%ld", g_skip_line[i].line, g_skip_line[i].n);
     d3d12_log("[madeira-d3d12] ml1049 skips by site (cumulative):%s\n", n ? buf : " none");
@@ -3252,9 +3267,11 @@ static obj_handle_t mad_pso_realize(struct mad_pso *p) {
     AcquireSRWLockExclusive(&p->rlock);   /* per pipeline: builds of different pipelines run in parallel */
     if (!p->rps && p->lazy) {
         obj_handle_t err = 0;
+        LONG64 t0 = mad_qpc();   /* madeira-bcd */
         p->rps = p->has_vd ? MTLDevice_newRenderPipelineStateVD(p->device_handle, &p->rp, &p->vd, &err)
                            : MTLDevice_newRenderPipelineState(p->device_handle, &p->rp, &err);
         if (err) mad_log_nserror(p->vs_name, err);
+        InterlockedExchangeAdd64(&g_pt_realize, mad_qpc() - t0); InterlockedIncrement(&g_pn_realize);
         if (p->rps) {
             LONG n = InterlockedIncrement(&g_pso_lazy_built);
             if (n == 1 || (n % 500) == 0)
@@ -8446,7 +8463,17 @@ static const unsigned char *rs_find_chunk(const unsigned char *b, SIZE_T n,
     return NULL;
 }
 
+static HRESULT device_CreateRootSignature_impl(ID3D12Device *This, UINT node,
+        const void *blob, SIZE_T blob_len, REFIID riid, void **out);
 static HRESULT STDMETHODCALLTYPE device_CreateRootSignature(ID3D12Device *This, UINT node,
+        const void *blob, SIZE_T blob_len, REFIID riid, void **out) {   /* madeira-bcd: timed */
+    LONG64 t0 = mad_qpc();
+    HRESULT hr = device_CreateRootSignature_impl(This, node, blob, blob_len, riid, out);
+    InterlockedExchangeAdd64(&g_pt_rs, mad_qpc() - t0);
+    InterlockedIncrement(&g_pn_rs);
+    return hr;
+}
+static HRESULT device_CreateRootSignature_impl(ID3D12Device *This, UINT node,
         const void *blob, SIZE_T blob_len, REFIID riid, void **out) {
     (void)This; (void)node;
     if (!out || !blob) return E_INVALIDARG;
@@ -9621,7 +9648,13 @@ done:
     free(buf); free(buf2); free(vsin); free(locs);
     return ok;
 }
-static void mad_ir_convert_cached(struct madeira_ir_convert_args *a) {
+static void mad_ir_convert_cached_impl(struct madeira_ir_convert_args *a);
+static void mad_ir_convert_cached(struct madeira_ir_convert_args *a) {   /* madeira-bcd: timed */
+    LONG64 t0 = mad_qpc();
+    mad_ir_convert_cached_impl(a);
+    InterlockedExchangeAdd64(&g_pt_conv, mad_qpc() - t0);
+}
+static void mad_ir_convert_cached_impl(struct madeira_ir_convert_args *a) {
     UINT64 key[2]; int fresh = 0;
     if (!mad_sc_init()) { MadeiraIRConvert(a); return; }
     mad_sc_key(a, key);
@@ -9912,6 +9945,7 @@ static obj_handle_t mad_convert_stage_opts(struct mad_device *d, struct mad_root
             return fn;
         }
     }
+    LONG64 lib_t0 = mad_qpc();   /* madeira-bcd: timed, with the function lookup below */
     obj_handle_t dd = DispatchData_alloc_init((uint64_t)(uintptr_t)buf, (uint64_t)a.ret_len);
     if (dd) {
         lib = MTLDevice_newLibrary(d->mtl_device, dd, &err);
@@ -9928,6 +9962,7 @@ static obj_handle_t mad_convert_stage_opts(struct mad_device *d, struct mad_root
     /* The converter RENAMES entry points, so the function is looked up by the
      * name reflection reported, never by the D3D-side name. */
     fn = MTLLibrary_newFunction(lib, name);
+    InterlockedExchangeAdd64(&g_pt_lib, mad_qpc() - lib_t0); InterlockedIncrement(&g_pn_lib);
     if (!fn) {
         d3d12_log("[madeira-d3d12] %s: converted library has no function '%s'\n", tag, name);
         NSObject_release(lib);
@@ -10482,7 +10517,19 @@ static void mad_dtess_convert(struct mad_device *d, struct mad_rootsig *rs, stru
     free(L);
 }
 
+static HRESULT device_CreateGraphicsPipelineState_impl(ID3D12Device *This,
+        const D3D12_GRAPHICS_PIPELINE_STATE_DESC *desc, REFIID riid, void **out);
 static HRESULT STDMETHODCALLTYPE device_CreateGraphicsPipelineState(ID3D12Device *This,
+        const D3D12_GRAPHICS_PIPELINE_STATE_DESC *desc, REFIID riid, void **out) {   /* madeira-bcd: timed */
+    LONG64 t0 = mad_qpc();
+    HRESULT hr = device_CreateGraphicsPipelineState_impl(This, desc, riid, out);
+    LONG n;
+    InterlockedExchangeAdd64(&g_pt_gfx, mad_qpc() - t0);
+    n = InterlockedIncrement(&g_pn_gfx);
+    if ((n % 2000) == 0) mad_pso_time_report("every 2000 graphics pipelines");
+    return hr;
+}
+static HRESULT device_CreateGraphicsPipelineState_impl(ID3D12Device *This,
         const D3D12_GRAPHICS_PIPELINE_STATE_DESC *desc, REFIID riid, void **out) {
     struct mad_device *d = (struct mad_device *)This;
     struct mad_rootsig *rs;
@@ -10985,7 +11032,17 @@ static int mad_cs_dump_on(void) {
     return on > 0;
 }
 
+static HRESULT device_CreateComputePipelineState_impl(ID3D12Device *This,
+        const D3D12_COMPUTE_PIPELINE_STATE_DESC *desc, REFIID riid, void **out);
 static HRESULT STDMETHODCALLTYPE device_CreateComputePipelineState(ID3D12Device *This,
+        const D3D12_COMPUTE_PIPELINE_STATE_DESC *desc, REFIID riid, void **out) {   /* madeira-bcd: timed */
+    LONG64 t0 = mad_qpc();
+    HRESULT hr = device_CreateComputePipelineState_impl(This, desc, riid, out);
+    InterlockedExchangeAdd64(&g_pt_cs, mad_qpc() - t0);
+    InterlockedIncrement(&g_pn_cs);
+    return hr;
+}
+static HRESULT device_CreateComputePipelineState_impl(ID3D12Device *This,
         const D3D12_COMPUTE_PIPELINE_STATE_DESC *desc, REFIID riid, void **out) {
     struct mad_device *d = (struct mad_device *)This;
     struct mad_pso *p;

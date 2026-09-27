@@ -299,6 +299,13 @@ already did.
   `shadercache/.build` with the build stamp and, when it differs, removes the
   entries written before the process started in a background thread (`DXBC
   shader cache: removed N entries of earlier builds`).
+- Pipeline-creation timing (`madeira_d3d12.c` `mad_pso_time_report`): graphics
+  and compute pipeline creation, the shader conversion + cache inside them,
+  new Metal library creation, root signatures and lazy pipeline builds at the
+  first draw are timed (QPC, summed over threads) and logged as `pso time
+  (...)` every 2000 graphics pipelines and with the periodic ml1049 report --
+  to see how much of the "Compiling shaders" screen is Madeira's and how much
+  the game's own (emulated) work.
 - Compute-shader dumps are opt-in (`madeira_d3d12.c` `mad_cs_dump_on`,
   madeira.cfg `cs-dump = 1`): ml931 wrote the first 400 compute shaders of
   every launch to `C:\madeira-cs\cs_<pipeline pointer>_<size>.dxil`, and the

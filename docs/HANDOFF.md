@@ -302,13 +302,15 @@ launch logs that shader's bytecode once (harmless, ~8 log lines); delete the
 file in the Wine prefix to stop it.
 
 ### Open issues, roughly in priority order (updated overnight 2026-09-27/28)
-Waiting for the owner's device test of build 201, which carries everything
+Waiting for the owner's device test of build 203 (= 201 + pipeline-creation
+timing; same shader-cache identity as 201/202), which carries everything
 from the night: C++ exception crash after a save (196), shader cache kept
 across builds (197), MSC flags for the slight artefacts (198), DXIL
 tessellation / water and one mkdir per cache bucket (199), compute-shader
 dumps opt-in with the old ones deleted and the DXBC cache of earlier builds
 removed (201; run 200 was cancelled by 201's dispatch).
-1. **Verify 201 on the device**: `[pc2fh]` at start-up and no VCRUNTIME140_1
+1. **Verify 203 on the device** (`pso time (...)` lines say how much of
+   "Compiling shaders" is Madeira's): `[pc2fh]` at start-up and no VCRUNTIME140_1
    crash after saving; `shader cache ON ... identity 'madeira_d3d12 bc1
    converter <hex>'` and mostly hits on the second launch; `[madeira-ir] MSC
    4.0.1 compatibility: position invariance on, strict NaN/Inf on, ...`;
