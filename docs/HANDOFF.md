@@ -515,4 +515,10 @@ properly (docs/madeira-bcd.md "Depth-stencil planes in copies"). Also seen:
 UAV descriptors holding texture ids that resolve to no live texture (0x6cdc..
 0x6cde, many shaders) and cs 3bc86a8a91b059a4 u8 resolving to the depth
 (probably unused table slots; watch after the fix).
+* Longer play in the same build-192 run (log 2026-09-27 22:18, part 2): no
+  crash, footprint peak 6.6 GB. When the owner switched apps, iOS refused the
+  GPU work ("Insufficient Permission (to submit GPU work from background)",
+  code 7); Madeira took that for a GPU fault and switched the fault
+  diagnostics on for good (every compute dispatch in its own encoder = slower
+  for the rest of the run). Build 194 ignores that error for diagnostics.
 

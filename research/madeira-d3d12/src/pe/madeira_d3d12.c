@@ -5504,6 +5504,14 @@ static void mad_cb_log_error(struct mad_device *d, obj_handle_t cb) {
      * on nothing renders and the game looks frozen (ph-rdr34: page fault, hang,
      * then ignored, first story cutscene). The queue is dead; a fresh one is not. */
     if (d && strstr(text, "SubmissionsIgnored")) InterlockedExchange(&d->queue_poisoned, 1);
+    /* madeira-bcd: iOS refuses GPU work while the app is in the background
+     * ("Insufficient Permission (to submit GPU work from background)"). That is
+     * not a fault of any encoder; turning on the fault diagnostics for it made
+     * every later compute dispatch run in its own encoder for the rest of the run. */
+    else if (strstr(text, "Background") || strstr(text, "from background")) {
+        static LONG bsaid;
+        if (InterlockedIncrement(&bsaid) <= 4) d3d12_log("[madeira-d3d12] command buffer refused while the app was in the background; not a GPU fault\n");
+    }
     else mad_fault_report(cb);   /* madeira-bcd: which encoder */
 }
 static void mad_vis_retire(struct mad_device *d, obj_handle_t cb);
