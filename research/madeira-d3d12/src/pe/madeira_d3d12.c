@@ -9364,10 +9364,18 @@ static int mad_sc_init(void) {
     ReleaseSRWLockExclusive(&lk);
     return g_sc_on;
 }
+static volatile LONG g_sc_made[8];   /* madeira-bcd: the 256 subdirectories this process has created */
 static void mad_sc_path(const UINT64 key[2], WCHAR *out, int mkdir) {
     WCHAR sub[MAX_PATH];
-    _snwprintf(sub, MAX_PATH, L"%ls\\%02x", g_sc_dir, (unsigned)(key[0] >> 56));
-    if (mkdir) CreateDirectoryW(sub, NULL);
+    unsigned bucket = (unsigned)(key[0] >> 56);
+    _snwprintf(sub, MAX_PATH, L"%ls\\%02x", g_sc_dir, bucket);
+    /* madeira-bcd: once per bucket and process. Every store used to create it
+     * again; on an existing directory that is a failed NtCreateFile (a
+     * wineserver round trip, logged as [file-wfail] ... 0xc0000035) for each of
+     * a cold cache's ~29,000 entries. */
+    if (mkdir && !((ULONG)g_sc_made[bucket >> 5] & (1u << (bucket & 31))) &&
+        (CreateDirectoryW(sub, NULL) || GetLastError() == ERROR_ALREADY_EXISTS))
+        InterlockedOr(&g_sc_made[bucket >> 5], (LONG)(1u << (bucket & 31)));
     _snwprintf(out, MAX_PATH, L"%ls\\%016llx%016llx.msc", sub, (unsigned long long)key[0], (unsigned long long)key[1]);
 }
 static void mad_sc_stats(void) {
@@ -9542,6 +9550,10 @@ static void mad_sc_write_file(const UINT64 key[2], const unsigned char *blob, SI
     mad_sc_path(key, path, 1);
     _snwprintf(tmp, MAX_PATH, L"%ls.%lx.tmp", path, GetCurrentThreadId());
     f = CreateFileW(tmp, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
+    if (f == INVALID_HANDLE_VALUE) {   /* the bucket may be gone: create it again next time */
+        unsigned bucket = (unsigned)(key[0] >> 56);
+        InterlockedAnd(&g_sc_made[bucket >> 5], (LONG)~(1u << (bucket & 31)));
+    }
     if (f != INVALID_HANDLE_VALUE) {
         BOOL w = WriteFile(f, blob, (DWORD)total, &put, NULL) && put == (DWORD)total;
         CloseHandle(f);
