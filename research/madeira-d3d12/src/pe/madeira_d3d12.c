@@ -143,13 +143,19 @@ static int g_census_on;   /* ml899: one frame at presents 1500,1700,...,2800 */
  * vanish before its draw, in depth, in the G-buffer, or only in lighting" can
  * then be answered from a Mac (build/tools/capture-to-png.py). */
 static int g_capture_on; static unsigned g_capture_left; static UINT64 g_capture_frame;
-struct mad_capbuf { obj_handle_t buf; void *cpu; UINT64 bytes; UINT w, h, bpr, pf, dxgi; unsigned enc, idx; char kind[8]; char name[40]; char what[64]; char alias[256]; };
+struct mad_capbuf { obj_handle_t buf; void *cpu; UINT64 bytes; UINT w, h, bpr, pf, dxgi; unsigned enc, idx; char kind[8]; char name[40]; char what[64]; char alias[256]; void *own; };
 /* madeira-bcd: CAP contact sheets. Attachments and compute UAV outputs of the
  * captured frame become numbered thumbnails on PNG sheets (Documents/capture/
  * f<frame>_sheetNN.png), converted on the phone, so no Mac is needed to look at
  * them; NaN/Inf texels are painted magenta and counted. g_cap_lock guards the
  * capture list (queues can replay on different threads). */
 #define MAD_SH_MAX_THUMBS 480
+/* madeira-bcd: a capture copy lives in memory WE allocate (a no-copy Metal
+ * buffer over it), so the CPU pointer the thumbnails read is ours until we
+ * free it: build 191 read a Metal-allocated shared buffer whose pages were
+ * already gone (prot 0) and died in the thumbnailer. */
+struct mad_device;
+static obj_handle_t mad_capbuf_alloc(struct mad_device *d, UINT64 len, void **cpu);
 static SRWLOCK g_cap_lock = SRWLOCK_INIT; static int g_cap_uav = 1, g_cap_raw; static unsigned g_cap_skipped, g_sheet_thumbs;
 static struct mad_capbuf *g_capbufs; static unsigned g_ncapbufs, g_capbufs_cap; static UINT64 g_cap_bytes;
 #define MAD_CAPTURE_BUDGET (384ull << 20)
@@ -1772,6 +1778,23 @@ static void exec_end(struct mad_exec *e) {
     if (cdraws && g_capture_on) mad_capture_pass(e, crt, cn, crtp, cdepth, &cdp, cseq, cdraws);   /* ml1098: after the pass, before anything else */
 }
 
+static obj_handle_t mad_capbuf_alloc(struct mad_device *d, UINT64 len, void **cpu) {
+    SIZE_T alen = (SIZE_T)((len + 0xffff) & ~(UINT64)0xffff);
+    void *mem = VirtualAlloc(NULL, alen, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    struct WMTBufferInfo bi; obj_handle_t buf;
+    *cpu = NULL;
+    if (!mem) return 0;
+    memset(&bi, 0, sizeof bi); bi.length = alen; bi.options = WMTResourceStorageModeShared; bi.memory.ptr = mem;
+    buf = MTLDevice_newBuffer(d->mtl_device, &bi);
+    if (!buf) { VirtualFree(mem, 0, MEM_RELEASE); return 0; }
+    *cpu = mem;
+    return buf;
+}
+static void mad_capbuf_free(struct mad_capbuf *c) {
+    if (c->buf) NSObject_release(c->buf);
+    if (c->own) VirtualFree(c->own, 0, MEM_RELEASE);
+    c->buf = 0; c->own = NULL;
+}
 /* ml1098: one attachment -> one shared buffer, one file later. */
 static void mad_capture_one(struct mad_exec *e, obj_handle_t benc, struct mad_resource *r, const struct mad_rtvp *v,
                             unsigned seq, unsigned idx, const char *kind, UINT options, const char *what) {
@@ -1814,19 +1837,22 @@ static void mad_capture_one(struct mad_exec *e, obj_handle_t benc, struct mad_re
                                       (unsigned long long)(MAD_CAPTURE_BUDGET >> 20), seq);
         return;
     }
-    memset(&bi, 0, sizeof bi); bi.length = total; bi.options = WMTResourceStorageModeShared;
-    buf = MTLDevice_newBuffer(e->q->device->mtl_device, &bi);
-    if (!buf || !bi.memory.ptr) { if (buf) NSObject_release(buf); ReleaseSRWLockExclusive(&g_cap_lock); return; }
+    memset(&bi, 0, sizeof bi);
+    buf = mad_capbuf_alloc(e->q->device, total, &bi.memory.ptr);
+    if (!buf) { ReleaseSRWLockExclusive(&g_cap_lock); return; }
     memset(&k, 0, sizeof k);
     k.type = WMTBlitCommandCopyFromTextureToBuffer;
     k.src = r->texture; k.slice = v->slice; k.level = v->level;
     k.size.width = w; k.size.height = h; k.size.depth = 1;
     k.dst = buf; k.offset = 0; k.bytes_per_row = (UINT32)bpr; k.bytes_per_image = (UINT32)total; k.options = options;
     MTLBlitCommandEncoder_encodeCommands(benc, (const struct wmtcmd_base *)&k);
-    if (!mad_grow((void **)&g_capbufs, &g_capbufs_cap, g_ncapbufs + 1, sizeof *g_capbufs)) { NSObject_release(buf); ReleaseSRWLockExclusive(&g_cap_lock); return; }
+    if (!mad_grow((void **)&g_capbufs, &g_capbufs_cap, g_ncapbufs + 1, sizeof *g_capbufs)) {
+        struct mad_capbuf t; memset(&t, 0, sizeof t); t.buf = buf; t.own = bi.memory.ptr; mad_capbuf_free(&t);
+        ReleaseSRWLockExclusive(&g_cap_lock); return;
+    }
     cb = &g_capbufs[g_ncapbufs++];
     memset(cb, 0, sizeof *cb);
-    cb->buf = buf; cb->cpu = bi.memory.ptr; cb->bytes = total; cb->w = w; cb->h = h; cb->bpr = (UINT)bpr;
+    cb->buf = buf; cb->cpu = bi.memory.ptr; cb->own = bi.memory.ptr; cb->bytes = total; cb->w = w; cb->h = h; cb->bpr = (UINT)bpr;
     if (what) snprintf(cb->what, sizeof cb->what, "%s", what);
     mad_alias_desc(r, cb->alias, sizeof cb->alias);   /* madeira-bcd: which placed resources share its memory */
     cb->pf = options == 2 ? (UINT)WMTPixelFormatStencil8 : (r->is_depth ? (UINT)WMTPixelFormatDepth32Float : (UINT)r->tex_pf);
@@ -2112,7 +2138,7 @@ static void mad_capture_drain(struct mad_device *d, UINT64 frame, int final) {
             d3d12_log("[capture] %s %s (%llu bytes, bpr %u)\n", a.ret ? "wrote" : "FAILED", a.name, (unsigned long long)c->bytes, c->bpr);
         }
         g_cap_bytes -= c->bytes < g_cap_bytes ? c->bytes : g_cap_bytes;
-        NSObject_release(c->buf);
+        mad_capbuf_free(c);
     }
     if (i) { memmove(g_capbufs, g_capbufs + i, (g_ncapbufs - i) * sizeof *g_capbufs); g_ncapbufs -= i; }
     if (final) {
@@ -2147,19 +2173,24 @@ static void mad_capture_buffer(struct mad_exec *e, obj_handle_t benc, struct mad
     UINT64 len = r->size > off ? r->size - off : 0; obj_handle_t buf; struct WMTBufferInfo bi; struct wmtcmd_blit_copy_from_buffer_to_buffer k; struct mad_capbuf *cb;
     if (!r->buffer || !len) return;
     if (len > max) len = max;
-    memset(&bi, 0, sizeof bi); bi.length = len; bi.options = WMTResourceStorageModeShared;
-    buf = MTLDevice_newBuffer(e->q->device->mtl_device, &bi);
-    if (!buf || !bi.memory.ptr) { if (buf) NSObject_release(buf); return; }
+    memset(&bi, 0, sizeof bi);
+    buf = mad_capbuf_alloc(e->q->device, len, &bi.memory.ptr);   /* madeira-bcd: our memory */
+    if (!buf) return;
     memset(&k, 0, sizeof k); k.type = WMTBlitCommandCopyFromBufferToBuffer;
     k.src = r->buffer; k.src_offset = off; k.dst = buf; k.dst_offset = 0; k.copy_length = len;
     MTLBlitCommandEncoder_encodeCommands(benc, (const struct wmtcmd_base *)&k);
-    if (!mad_grow((void **)&g_capbufs, &g_capbufs_cap, g_ncapbufs + 1, sizeof *g_capbufs)) { NSObject_release(buf); return; }
+    AcquireSRWLockExclusive(&g_cap_lock);   /* madeira-bcd: the list is shared with the drain */
+    if (!mad_grow((void **)&g_capbufs, &g_capbufs_cap, g_ncapbufs + 1, sizeof *g_capbufs)) {
+        struct mad_capbuf t; memset(&t, 0, sizeof t); t.buf = buf; t.own = bi.memory.ptr; mad_capbuf_free(&t);
+        ReleaseSRWLockExclusive(&g_cap_lock); return;
+    }
     cb = &g_capbufs[g_ncapbufs++]; memset(cb, 0, sizeof *cb);
-    cb->buf = buf; cb->cpu = bi.memory.ptr; cb->bytes = len; cb->w = (UINT)len; cb->h = 1; cb->bpr = (UINT)len; cb->enc = seq; cb->idx = idx;
+    cb->buf = buf; cb->cpu = bi.memory.ptr; cb->own = bi.memory.ptr; cb->bytes = len; cb->w = (UINT)len; cb->h = 1; cb->bpr = (UINT)len; cb->enc = seq; cb->idx = idx;
     snprintf(cb->kind, sizeof cb->kind, "%s", kind);
     { const char *n = r->name ? r->name : "buf"; unsigned i; for (i = 0; i < sizeof cb->name - 1 && n[i]; i++) cb->name[i] = isalnum((unsigned char)n[i]) ? n[i] : '_'; cb->name[i] = 0; }
     g_cap_bytes += len;
-    d3d12_log("[capture-draw] %s%u <- %s off=%llu len=%llu (resource %llu bytes, gpu 0x%llx)\n", kind, idx, cb->name,
+    ReleaseSRWLockExclusive(&g_cap_lock);
+    d3d12_log("[capture-draw] %s%u <- %s off=%llu len=%llu (resource %llu bytes, gpu 0x%llx)\n", kind, idx, r->name ? r->name : "buf",
               (unsigned long long)off, (unsigned long long)len, (unsigned long long)r->size, (unsigned long long)r->gpu_address);
 }
 static struct mad_resource *mad_texture_of_view(struct mad_device *d, UINT64 id, int *xv);
@@ -2324,13 +2355,30 @@ static void mad_capture_dispatch_outputs(struct mad_exec *e, const struct mad_cm
                 rg = &rs->ranges[p->first_range + ri];
                 nd = rg->num_descriptors;
                 off = rg->table_offset != 0xffffffffu ? rg->table_offset : run;
-                if (nd == 0xffffffffu) break;
+                if (nd == 0xffffffffu || nd > 64) nd = 64;   /* unbounded: look at the first 64 */
                 run = off + nd;
-                if (rg->range_type != MADEIRA_IR_RANGE_UAV || nd > 16) continue;
+                if (rg->range_type != MADEIRA_IR_RANGE_UAV) continue;
                 for (k = 0; k < nd && base + off + k < e->srv->count; k++) {
                     const struct mad_descriptor *de = &e->srv->cpu[base + off + k];
                     UINT64 boff = 0; struct mad_resource *br; char al[256];
-                    if (!de->gpu_va || (de->texture_view_id && !(de->metadata >> 63))) continue;
+                    if (de->texture_view_id && !(de->metadata >> 63)) {   /* madeira-bcd: where does this UAV texture id really point? */
+                        static LONG tsaid; int xv = -1; struct mad_resource *tr = mad_texture_of_view(d, de->texture_view_id, &xv);
+                        if (!tr) {
+                            if (InterlockedIncrement(&tsaid) <= 400)
+                                d3d12_log("[capture-uavtex] enc#%u cs %016llx u%u: texture id %#llx resolves to NO live texture (stale descriptor?)\n",
+                                          e->cenc_seq, (unsigned long long)e->cpso->cs_hash, rg->base_register + k, (unsigned long long)de->texture_view_id);
+                        } else if (tr->desc.Flags & (D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL | D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET)) {
+                            if (InterlockedIncrement(&tsaid) <= 400) {
+                                mad_res_short(tr, al, sizeof al);
+                                d3d12_log("[capture-uavtex] enc#%u cs %016llx u%u -> %s %s%s (%s)\n", e->cenc_seq, (unsigned long long)e->cpso->cs_hash,
+                                          rg->base_register + k, al, tr->name ? tr->name : "?",
+                                          (tr->desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) ? "" : " WITHOUT the UAV flag",
+                                          (tr->desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL) ? "a DEPTH target" : "a render target");
+                            }
+                        }
+                        continue;
+                    }
+                    if (!de->gpu_va) continue;
                     br = mad_resolve_address(d, de->gpu_va, &boff);
                     if (br && br->placed_heap && InterlockedIncrement(&bsaid) <= 600) {
                         mad_alias_desc(br, al, sizeof al);

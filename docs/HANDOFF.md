@@ -479,3 +479,27 @@ Contact sheets work (283 thumbnails, 15 sheets). Findings:
   (captured as a UAV target) read past its copy while holding the capture
   lock. Fixed in 191 (BC skipped, reads bounds-checked).
 
+### Build 191 results (logs 2026-09-27 21:46 and 21:48)
+* Run 1 died before the main menu with the SAME C++ exception crash as after
+  the save in build 187 (AV READ of 0x16694 in VCRUNTIME140_1, handler
+  GhostOfTsushima.exe+0xd15f0c). No `[cxx-throw]` line: build 188's repair in
+  unix `NtRaiseException` is never reached, because ARM64EC
+  `RtlRaiseException` (wine/dlls/ntdll/signal_arm64ec.c) dispatches in user
+  mode unless `peb->BeingDebugged`; only the second chance goes to the
+  syscall. The PE ntdll is a tracked binary, so the fix has to live somewhere
+  else (open; needs a deeper look -- where does the zero ThrowImageBase come
+  from: the record, or vcruntime's per-thread `_ThrowImageBase`?).
+* Run 2: pressing CAP crashed in `mad_texel_rgb` (madeira_d3d12+0x19478,
+  default case): the capture copy's Metal-allocated shared memory was not
+  mapped any more (prot 0). Build 192 backs capture copies with our own
+  VirtualAlloc memory (no-copy Metal buffer) and locks the list in
+  `mad_capture_buffer` too.
+* **The aliasing hypothesis is refuted**: not a single `[placed]` line --
+  GoT never calls CreatePlacedResource; its heaps stay empty, the depth is a
+  committed resource. New leading hypothesis: a compute UAV descriptor holds a
+  texture resource id that now belongs to the depth texture (a stale id of a
+  released texture, reused by Metal), so a dispatch writes into depth. Build
+  192 logs `[capture-uavtex]` for every UAV texture id (bounded ranges and
+  the first 64 of unbounded ones) that resolves to no live texture or to a
+  render-target / depth texture.
+
