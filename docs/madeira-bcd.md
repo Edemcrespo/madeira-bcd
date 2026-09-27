@@ -272,7 +272,19 @@ already did.
   dispatch can write. Block-compressed textures are no longer thumbnailed and
   every thumbnail read is bounds-checked (a BC1 UAV target read past its copy
   and hung the second CAP of build 190).
-- C++ throw repair (`build/ntdll-unix/thread_ios.c`, `NtRaiseException`): a
+- RtlPcToFileHeader knows JIT-pool aliases (`build/ntdll-unix/virtual_ios.c`,
+  `ios_patch_rtl_pc_to_file_header`, called from both ntdll hook sites in
+  `loader_ios.c`): the pool copy of the prebuilt PE ntdll's RtlPcToFileHeader
+  gets its third instruction (`mov x20, x0`) replaced by a BL to a
+  six-instruction trampoline in the padding after ntdll's .text, which maps
+  x0 through `ios_jit_reverse_translate_addr` first. ARM64EC builtins compute
+  their own addresses PC-relative in the pool, so Wine's `_CxxThrowException`
+  recorded image base 0 for a pool ThrowInfo (magic still 0x19930520) and
+  Microsoft's `__CxxFrameHandler4` read 0 + RVA: Ghost of Tsushima's crash
+  when Wine's msvcp140 throws std::runtime_error (after a save, sometimes at
+  start-up). Every instruction is verified before patching; log `[pc2fh]`.
+  Also fixes RTTI and GetModuleHandleEx(FROM_ADDRESS) on pool addresses.
+- C++ throw repair (only reached with a debugger attached -- ARM64EC RtlRaiseException dispatches in user mode; superseded by the entry above) (`build/ntdll-unix/thread_ios.c`, `NtRaiseException`): a
   64-bit C++ exception (0xE06D7363, 4 parameters) whose ThrowInfo pointer is a
   JIT-pool alias is mapped back to the PE image and gets that image's base as
   ThrowImageBase; a ThrowImageBase of 0 is filled from the owning MEM_IMAGE

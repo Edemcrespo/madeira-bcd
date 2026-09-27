@@ -5614,6 +5614,101 @@ void ios_jit_sync_write(void *addr, size_t size)
     }
 }
 
+/* madeira-bcd: RtlPcToFileHeader must know JIT-pool aliases.
+ *
+ * ARM64EC builtins run from their pool copy, so every address they compute
+ * PC-relative -- their own code, .rdata, the C++ throw descriptors Wine emits
+ * into .text -- is a pool VA that no loader entry covers. Wine's
+ * _CxxThrowException stores RtlPcToFileHeader(ThrowInfo) as the throw's image
+ * base: 0 for a pool VA, while the magic stays 0x19930520. Microsoft's
+ * __CxxFrameHandler4 (the game's VCRUNTIME140_1) then reads 0 + RVA and dies.
+ * Ghost of Tsushima: std::runtime_error from Wine's msvcp140 (ThrowInfo at
+ * RVA 0x166a0, CatchableTypeArray 0x16694 = the fault address), after a save
+ * and sometimes at start-up. The same lookup serves RTTI and
+ * GetModuleHandleEx(FROM_ADDRESS).
+ *
+ * The PE ntdll is a prebuilt binary, so the pool copy of RtlPcToFileHeader is
+ * patched in place: its third instruction, `mov x20, x0` (right after the
+ * prologue saved x19-x21 and x30), becomes a BL to a six-instruction
+ * trampoline in the padding after ntdll's .text that maps x0 through
+ * ios_jit_reverse_translate_addr (identity for anything outside the pool),
+ * performs the displaced `mov x20, x0` and returns. Every instruction is
+ * checked first; any mismatch leaves the function alone. Idempotent. */
+int ios_patch_rtl_pc_to_file_header( void *module, const void *export_addr )
+{
+    static const unsigned char ffs[10] = { 0x48,0x8b,0xc4,0x48,0x89,0x58,0x20,0x55,0x5d,0xe9 };
+    extern void *ios_jit_reverse_translate_addr(const void *addr);
+    const unsigned char *t = export_addr, *img = module;
+    uintptr_t base = (uintptr_t)module, body_pe, rx_lo = (uintptr_t)ios_jit_rx_base_global;
+    uint32_t e_lfanew, nsec, optsz, size_of_image, body_rva, sec_va = 0, sec_vs = 0, gap_end = 0, tramp_rva, i;
+    const unsigned char *sh;
+    char *base_rx, *body_rx, *tramp_rx, *body_rw, *tramp_rw;
+    uint32_t *tw, bl, want_tramp[6] = { 0xa9bf7be1, 0x580000b0, 0xd63f0200, 0xa8c17be1, 0xaa0003f4, 0xd65f03c0 };
+    int32_t rel;
+    int64_t delta;
+    int found = 0;
+
+    if (!module || !export_addr || !rx_lo || !ios_jit_rw_base_global) return -1;
+    /* the export is an x64 fast-forward thunk: mov rax,rsp; mov [rax+20h],rbx; push rbp; pop rbp; jmp body */
+    if (memcmp( t, ffs, sizeof(ffs) )) { dprintf( 2, "[pc2fh] export %p is not the expected thunk -- not patched\n", t ); return -1; }
+    memcpy( &rel, t + 10, 4 );
+    body_pe = (uintptr_t)t + 14 + (intptr_t)rel;
+    memcpy( &e_lfanew, img + 0x3c, 4 );
+    nsec = *(const uint16_t *)(img + e_lfanew + 6);
+    optsz = *(const uint16_t *)(img + e_lfanew + 20);
+    memcpy( &size_of_image, img + e_lfanew + 24 + 56, 4 );
+    if (body_pe <= base || body_pe - base >= size_of_image) return -1;
+    body_rva = (uint32_t)(body_pe - base);
+    sh = img + e_lfanew + 24 + optsz;
+    for (i = 0; i < nsec; i++)
+    {
+        uint32_t vs, va;
+        memcpy( &vs, sh + 40 * i + 8, 4 ); memcpy( &va, sh + 40 * i + 12, 4 );
+        if (body_rva >= va && body_rva < va + vs) { sec_va = va; sec_vs = vs; found = 1; }
+    }
+    if (!found) return -1;
+    gap_end = size_of_image;
+    for (i = 0; i < nsec; i++)
+    {
+        uint32_t va;
+        memcpy( &va, sh + 40 * i + 12, 4 );
+        if (va > sec_va && va < gap_end) gap_end = va;
+    }
+    tramp_rva = (gap_end - 64) & ~15u;
+    if (tramp_rva < sec_va + sec_vs + 16) { dprintf( 2, "[pc2fh] no padding after the section -- not patched\n" ); return -1; }
+
+    base_rx = ios_jit_translate_addr( module );
+    if ((uintptr_t)base_rx == base || (uintptr_t)base_rx < rx_lo || (uintptr_t)base_rx - rx_lo >= ios_jit_pool_size_global) return -1;
+    body_rx = base_rx + body_rva; tramp_rx = base_rx + tramp_rva;
+    body_rw = (char *)ios_jit_rw_base_global + ((uintptr_t)body_rx - rx_lo);
+    tramp_rw = (char *)ios_jit_rw_base_global + ((uintptr_t)tramp_rx - rx_lo);
+    tw = (uint32_t *)body_rx;
+    delta = (int64_t)((intptr_t)tramp_rx - (intptr_t)(body_rx + 8));
+    if (delta & 3 || delta >= (1ll << 27) || delta < -(1ll << 27)) return -1;
+    bl = 0x94000000u | ((uint32_t)(delta >> 2) & 0x03ffffffu);
+    if (tw[2] == bl) return 0;   /* this copy is already patched */
+    if (tw[0] != 0xa9be53f3 || tw[1] != 0xa9017bf5 || tw[2] != 0xaa0003f4)
+    {
+        dprintf( 2, "[pc2fh] RtlPcToFileHeader at %p starts %08x %08x %08x, not the expected prologue -- not patched\n",
+                 body_rx, tw[0], tw[1], tw[2] );
+        return -1;
+    }
+    for (i = 0; i < 32; i++)
+        if (((const unsigned char *)tramp_rx)[i]) { dprintf( 2, "[pc2fh] padding at %p is in use -- not patched\n", tramp_rx ); return -1; }
+
+    memcpy( tramp_rw, want_tramp, sizeof(want_tramp) );
+    {
+        uint64_t fn = (uint64_t)(uintptr_t)ios_jit_reverse_translate_addr;
+        memcpy( tramp_rw + 24, &fn, 8 );   /* ldr x16 literal at +24 (8-aligned: tramp_rva is 16-aligned) */
+    }
+    sys_icache_invalidate( tramp_rx, 32 );
+    __atomic_store_n( (uint32_t *)(body_rw + 8), bl, __ATOMIC_RELEASE );
+    sys_icache_invalidate( body_rx + 8, 4 );
+    dprintf( 2, "[pc2fh] RtlPcToFileHeader %p (pool %p) now maps JIT-pool aliases to their image; trampoline %p\n",
+             (void *)body_pe, body_rx, tramp_rx );
+    return 1;
+}
+
 /***********************************************************************
  *           ios_jit_patch_x18  (x18 → TPIDR_EL0 binary patcher)
  *

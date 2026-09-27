@@ -532,3 +532,22 @@ The C++ exception crash (VCRUNTIME140_1, AV READ of 0x16694) happened again
 at the end of the run -- the next main task. Owner has been told to raise the
 effort level for it.
 
+### C++ exception crash: ROOT CAUSE and build 195 fix
+Analysed with Microsoft's 14.44 runtime (msvc-runtime wheel from PyPI, only
+for disassembly, never committed): the fault is `mov r12d,[rax+rbx]` at
+VCRUNTIME140_1+0x17b4 in FH4's FindHandler, rax = `_GetThrowImageBase()` = 0.
+FH4 copies the throw image base from ExceptionInformation[3] at entry. MS's
+`_CxxThrowException` would have switched the magic to 0x01994000 (pure) on a
+zero base, so the record came from WINE's builtin runtime: Madeira keeps
+Wine's ARM64EC vcruntime140 + msvcp140 (WineProcessBridge.m exemptions) but
+overlays MS vcruntime140_1/concrt140. At RVA 0x166a0 of the shipped
+arm64ec-windows/msvcp140.dll sits a ThrowInfo whose CatchableTypeArray RVA is
+0x16694 -- the fault address -- type `std::runtime_error`; build 187's stale
+rax was exactly that ThrowInfo's pool alias. Wine code computes the pointer
+PC-relative in its JIT-pool copy, RtlPcToFileHeader(pool VA) returns 0.
+Build 195 patches RtlPcToFileHeader's pool copy to reverse-translate first
+(`[pc2fh]` log line at start-up). The same crash hits every game that mixes
+Wine's msvcp140 with MS's vcruntime140_1 and catches a Wine-thrown exception.
+Verified offline against the shipped ntdll.dll with a harness (patch lands on
+RVA 0x35ea0, trampoline at RVA 0x8ffc0, idempotent).
+

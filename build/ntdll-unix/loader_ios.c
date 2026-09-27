@@ -2198,6 +2198,11 @@ static void load_ntdll_functions( HMODULE module )
             }
             else dprintf( 2, "XLATE-HOOK-REV export NOT FOUND\n" );
         }
+        {   /* madeira-bcd: pool aliases in RtlPcToFileHeader (virtual_ios.c) */
+            extern int ios_patch_rtl_pc_to_file_header( void *module, const void *export_addr );
+            void *f = (void *)find_named_export( module, exports, "RtlPcToFileHeader" );
+            if (f) ios_patch_rtl_pc_to_file_header( module, f );
+        }
     }
 
     /* Sync dispatcher pointers to JIT pool .data copy.
@@ -2539,6 +2544,11 @@ static int ios_load_child_ec_ntdll( PEB *child_peb )
             }
             else dprintf( 2, "[ec-child-ntdll] p_ios_jit_reverse_translate_addr NOT FOUND"
                              " -- unwind will run in pool space\n" );
+        }
+        {   /* madeira-bcd: pool aliases in RtlPcToFileHeader (virtual_ios.c) */
+            extern int ios_patch_rtl_pc_to_file_header( void *module, const void *export_addr );
+            void *f = (void *)find_named_export( module, exports, "RtlPcToFileHeader" );
+            if (f) ios_patch_rtl_pc_to_file_header( module, f );
         }
 
         /* Sync all written slots into the pool copy (PE code reads there). */
