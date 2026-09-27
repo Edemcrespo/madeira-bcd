@@ -301,22 +301,29 @@ Note: `C:\madeira-cs\fault-shaders.txt` keeps hash 34c565ac8322ab2a, so every
 launch logs that shader's bytecode once (harmless, ~8 log lines); delete the
 file in the Wine prefix to stop it.
 
-### Open issues, roughly in priority order
-1. The freed-while-read memory race (build 184/185 notes above) — it kills
-   the game even without GPU problems. Then pipeline persistence
-   (MTLBinaryArchive). If GPU faults reappear, the fault machinery
-   names the kernel.
-2. **Black squares** on screen (menu and gameplay, fixed grid positions).
-   Not explained yet. Candidates: a tiled full-screen compute pass that skips
-   tiles, the missing R32G32B32_FLOAT texture format (`texture format 6 has no
-   Metal mapping`), tessellation placeholders. A frame capture
-   (`madeira.cfg` capture keys, `Documents/capture/`) would settle it.
-3. **Tessellation with DXIL**: 23 hull/domain pipelines are placeholders whose
-   draws are skipped (terrain/water missing). `mad_tess_build` only handles the
-   DXBC backend; DXIL needs the converter's tessellation emulation.
-4. **"Compiling shaders" takes ~1.5-2 min every launch** even with 100 % cache
-   hits: 30k small cache files opened through Wine plus ~11k Metal library
-   creations. Idea: pack the cache into one mapped file with an index.
+### Open issues, roughly in priority order (updated overnight 2026-09-27/28)
+Waiting for the owner's device test of build 199 (all of 196-199 in one):
+C++ exception crash after a save (196), shader cache kept across builds (197),
+MSC flags for the slight artefacts (198), DXIL tessellation / water (199).
+1. **Verify 199 on the device**: `[pc2fh]` at start-up and no VCRUNTIME140_1
+   crash after saving; `shader cache ON ... identity 'madeira_d3d12 bc1
+   converter <hex>'` and mostly hits on the second launch; `[madeira-ir] MSC
+   4.0.1 compatibility: position invariance on, strict NaN/Inf on, ...`;
+   water: `DXIL tessellation: vs ...`, `[winemetal] DXIL tessellation pipeline
+   OK`, `DXIL tessellation: N drawn` -- or the reason it stayed a placeholder.
+2. **Remaining slight artefacts** (owner, after build 194): nature unknown until
+   the screenshot. 198's flags are the best guess; if they persist, capture
+   (CAP) a frame showing them.
+3. **Performance**: 10-17 FPS in gameplay at 800x600. Frame 57-96 ms, GPU
+   22-36 ms of it (33-60 % busy), ExecuteCommandLists 10-17 ms on the game's
+   render thread, ~230 encoders a frame with a full fence chain (fence-chain
+   1; mode 6 has a known flicker hole). Mostly the game's own x86 threads
+   under FEX (TSO on, half barriers). Ideas: fewer useResource calls per draw
+   (up to 64 + heaps), MTLBinaryArchive for pipelines, attachment store
+   traffic (~500 MB a frame, 300-420 MB never read again).
+4. **"Compiling shaders" on a warm cache**: still one small file per shader
+   (~30k opens through Wine) plus ~11k Metal library creations. 197 halved the
+   reads (one per hit); packing the cache into one mapped file is the next step.
 5. The launcher window stays dark until Enter is pressed.
 6. `DXGIFactory::EnumAdapterByLuid` not implemented (Streamline only);
    non-occlusion queries resolve to zero; `ResolveQueryData` into GPU-only
