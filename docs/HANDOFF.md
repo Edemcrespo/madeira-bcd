@@ -522,3 +522,13 @@ UAV descriptors holding texture ids that resolve to no live texture (0x6cdc..
   diagnostics on for good (every compute dispatch in its own encoder = slower
   for the rest of the run). Build 194 ignores that error for diagnostics.
 
+### Build 194 result (log 2026-09-27 22:49): black squares FIXED
+Owner: ~90 % of the corruption gone, only slight artefacts left. The capture
+shows no NaN in the depth any more; the stencil round trip runs as
+`aspect copy r#465 stencil -> r#241 colour` and back. Remaining NaN: the
+RG16F G-buffer target r#483 (likely velocity) is cleared BY THE GAME with a
+NaN colour (`[capture-op] clear RT (-nan ...)`), so that one is intentional.
+The C++ exception crash (VCRUNTIME140_1, AV READ of 0x16694) happened again
+at the end of the run -- the next main task. Owner has been told to raise the
+effort level for it.
+
