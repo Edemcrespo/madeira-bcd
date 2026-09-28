@@ -300,6 +300,7 @@ struct mad_device {
     struct mad_mhret { obj_handle_t heap; UINT64 serial; void *mem; } *mhret; unsigned nmhret, mhret_cap;   /* ml1148: Metal heaps waiting for the GPU */
     struct { UINT32 value[4]; obj_handle_t buf; } fillpat[32]; unsigned nfillpat; SRWLOCK fillpat_lock;   /* ml1151: exact UAV clear patterns (a 16-byte period) */
     obj_handle_t k_lib, k_tind_pso, k_ring; UINT64 k_ring_pos; int k_state; SRWLOCK k_lock;   /* madeira-bcd: helper kernels (mad_kernels.metal) */
+    obj_handle_t k_probe_pso; unsigned char *k_ring_cpu;   /* madeira-bcd: indirect-argument probes */
     LONG64 hp_live_bytes, hp_total_bytes; LONG hp_textures, hp_fallbacks;
     LUID adapter_luid;   /* madeira-bcd: GetAdapterLuid, the DXGI adapter it was created on */
 };
@@ -3256,12 +3257,20 @@ static int mad_kernels_ready(struct mad_device *d) {
             if (err) mad_log_nserror("mad_tess_indirect_args", err);
             NSObject_release(fn);
         }
+        fn = d->k_lib ? MTLLibrary_newFunction(d->k_lib, "mad_probe_words") : 0;
+        if (fn) {
+            memset(&ci, 0, sizeof ci); ci.compute_function = fn; err = 0;
+            d->k_probe_pso = MTLDevice_newComputePipelineState(d->mtl_device, &ci, &err);
+            if (err) mad_log_nserror("mad_probe_words", err);
+            NSObject_release(fn);
+        }
         memset(&bi, 0, sizeof bi); bi.length = MAD_KRING_BYTES; bi.options = WMTResourceStorageModeShared;
         if (d->k_tind_pso) d->k_ring = MTLDevice_newBuffer(d->mtl_device, &bi);
-        if (d->k_ring) mad_resident(d, d->k_ring);
+        if (d->k_ring) { mad_resident(d, d->k_ring); d->k_ring_cpu = (unsigned char *)bi.memory.ptr; }
         d->k_state = d->k_tind_pso && d->k_ring ? 1 : -1;
-        d3d12_log("[madeira-d3d12] helper kernels: %s (library %d, indirect tessellation kernel %d, ring %d)\n",
-                  d->k_state > 0 ? "ready" : "NOT available", !!d->k_lib, !!d->k_tind_pso, !!d->k_ring);
+        d3d12_log("[madeira-d3d12] helper kernels: %s (library %d, indirect tessellation kernel %d, probe kernel %d, ring %d%s)\n",
+                  d->k_state > 0 ? "ready" : "NOT available", !!d->k_lib, !!d->k_tind_pso, !!d->k_probe_pso, !!d->k_ring,
+                  d->k_ring_cpu ? ", CPU-visible" : "");
 #else
         d->k_state = -1;
         d3d12_log("[madeira-d3d12] helper kernels: not built in (no metallib); indirect tessellation draws are skipped\n");
@@ -5194,6 +5203,65 @@ static void exec_copy(struct mad_exec *e, const struct mad_cmd *c) {
  * object threadgroups by the instance count. The render pass is split there,
  * as it is for any dispatch between draws. Returns 0 (the draws are skipped as
  * before) when the helper kernel is not available. */
+/* madeira-bcd: INDIRECT-ARGUMENT PROBES. Ghost of Tsushima's GPU time grows
+ * from ~17 to ~44 ms a frame within seconds while the command stream stays
+ * the same (~60 draws a list): something the GPU itself counts keeps growing
+ * (an append counter never reset, say, so ever more particles are simulated
+ * and drawn). Every 3 s per pipeline, the first argument record of an
+ * indirect draw or dispatch is copied to the CPU-visible ring, and the copy
+ * taken 3 s earlier is logged: counts that climb name the pipeline.
+ * madeira.cfg ind-probe = 0 turns it off. */
+static struct { const struct mad_pso *pso; UINT64 off; DWORD t; int kind, pending; } g_iprobe[96];
+static SRWLOCK g_iprobe_lock = SRWLOCK_INIT;
+static void exec_indirect_probe(struct mad_exec *e, const struct mad_cmd *c) {
+    static int on = -1; static LONG said;
+    struct mad_device *d = e->q->device;
+    const struct mad_pso *p = c->kind == MC_DISPATCH_INDIRECT ? e->cpso : e->pso;
+    struct wmtcmd_compute_setpso sp; struct wmtcmd_compute_setbuffer sb[2]; struct wmtcmd_compute_setbytes sby; struct wmtcmd_compute_dispatch dsp;
+    UINT32 n = c->kind == MC_DISPATCH_INDIRECT ? 3 : c->kind == MC_DRAW_INDEXED_INDIRECT ? 5 : 4;
+    DWORD now = GetTickCount();
+    unsigned k, slot = ~0u;
+    UINT64 off;
+    if (on < 0) on = (int)mad_cfg_int_pe("ind-probe", 1);
+    if (!on || !p || (c->u.ind.off & 3) || said >= 1500 || !mad_kernels_ready(d) || !d->k_probe_pso || !d->k_ring_cpu) return;
+    AcquireSRWLockExclusive(&g_iprobe_lock);
+    for (k = 0; k < sizeof g_iprobe / sizeof g_iprobe[0]; k++) {
+        if (g_iprobe[k].pso == p) { slot = k; break; }
+        if (!g_iprobe[k].pso && slot == ~0u) slot = k;
+    }
+    if (slot == ~0u || (g_iprobe[slot].pso == p && now - g_iprobe[slot].t < 3000)) { ReleaseSRWLockExclusive(&g_iprobe_lock); return; }
+    if (g_iprobe[slot].pso == p && g_iprobe[slot].pending) {
+        const UINT32 *w = (const UINT32 *)(d->k_ring_cpu + g_iprobe[slot].off);
+        LONG m = InterlockedIncrement(&said);
+        d3d12_log("[probe] %s '%s' first record: %u %u %u %u %u (%lu ms old)%s\n",
+                  g_iprobe[slot].kind == MC_DISPATCH_INDIRECT ? "dispatch" : g_iprobe[slot].kind == MC_DRAW_INDEXED_INDIRECT ? "draw-indexed" : "draw",
+                  p->vs_name, w[0], w[1], w[2], g_iprobe[slot].kind == MC_DISPATCH_INDIRECT ? 0 : w[3],
+                  g_iprobe[slot].kind == MC_DRAW_INDEXED_INDIRECT ? w[4] : 0, (unsigned long)(now - g_iprobe[slot].t),
+                  m == 1500 ? " -- probe log limit reached" : "");
+    }
+    off = mad_kring_alloc(d, 256);
+    if (off == ~(UINT64)0) { ReleaseSRWLockExclusive(&g_iprobe_lock); return; }
+    g_iprobe[slot].pso = p; g_iprobe[slot].off = off; g_iprobe[slot].t = now; g_iprobe[slot].kind = (int)c->kind; g_iprobe[slot].pending = 1;
+    ReleaseSRWLockExclusive(&g_iprobe_lock);
+    memset(d->k_ring_cpu + off, 0xff, 32);   /* 0xffffffff = never written */
+    if (!e->cenc) {
+        if (e->renc) InterlockedIncrement(&g_pass_end_dispatch);
+        exec_end(e);
+        e->cenc = MTLCommandBuffer_computeCommandEncoder(e->cb, false);
+        if (!e->cenc) return;
+        g_enc_seq++; e->cenc_pso = NULL; e->cenc_seq = g_enc_seq;
+        exec_fence_compute(e, e->cenc, 0);
+    }
+    memset(&sp, 0, sizeof sp); memset(sb, 0, sizeof sb); memset(&sby, 0, sizeof sby); memset(&dsp, 0, sizeof dsp);
+    sp.type = WMTComputeCommandSetPSO; sp.pso = d->k_probe_pso;
+    sp.threadgroup_size.width = 8; sp.threadgroup_size.height = 1; sp.threadgroup_size.depth = 1;
+    sb[0].type = WMTComputeCommandSetBuffer; sb[0].buffer = c->u.ind.args->buffer; sb[0].offset = c->u.ind.off; sb[0].index = 0;
+    sb[1].type = WMTComputeCommandSetBuffer; sb[1].buffer = d->k_ring; sb[1].offset = off; sb[1].index = 1;
+    sby.type = WMTComputeCommandSetBytes; sby.bytes.ptr = &n; sby.length = sizeof n; sby.index = 2;
+    dsp.type = WMTComputeCommandDispatch; dsp.size.width = 1; dsp.size.height = 1; dsp.size.depth = 1;
+    sp.next.ptr = &sb[0]; sb[0].next.ptr = &sb[1]; sb[1].next.ptr = &sby; sby.next.ptr = &dsp;
+    MTLComputeCommandEncoder_encodeCommands(e->cenc, (const struct wmtcmd_base *)&sp);
+}
 static int exec_tess_indirect_prep(struct mad_exec *e, const struct mad_cmd *c, UINT64 *out_off) {
     struct mad_device *d = e->q->device;
     struct wmtcmd_compute_setpso sp; struct wmtcmd_compute_setbuffer sb[2]; struct wmtcmd_compute_setbytes sby; struct wmtcmd_compute_dispatch dsp;
@@ -5488,6 +5556,7 @@ static void mad_exec_list(struct mad_queue *q, struct mad_list *l, obj_handle_t 
             struct mad_cmd t = *c; UINT k; UINT64 toff = 0;
             int tess = 0;
             if (!c->u.ind.args || !c->u.ind.args->buffer) { e.skipped++; break; }
+            exec_indirect_probe(&e, c);   /* madeira-bcd: diagnostics, every 3 s per pipeline */
             if (c->kind != MC_DISPATCH_INDIRECT && e.pso && e.pso->gs_emu == 2)   /* madeira-bcd */
                 tess = exec_tess_indirect_prep(&e, c, &toff);
             for (k = 0; k < c->u.ind.count; k++) {
@@ -6551,6 +6620,7 @@ static ULONG STDMETHODCALLTYPE device_Release(ID3D12Device *This) {
             for (k = 0; k < d->nfillpat; k++) if (d->fillpat[k].buf) NSObject_release(d->fillpat[k].buf);   /* ml1151 */
             if (d->k_ring) NSObject_release(d->k_ring);          /* madeira-bcd: helper kernels */
             if (d->k_tind_pso) NSObject_release(d->k_tind_pso);
+            if (d->k_probe_pso) NSObject_release(d->k_probe_pso);
             if (d->k_lib) NSObject_release(d->k_lib);
             free(d->theaps); free(d->hret);
             DeleteCriticalSection(&d->heap_lock);

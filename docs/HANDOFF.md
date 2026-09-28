@@ -623,6 +623,23 @@ tracked DLL and stay green).
   build and never lost the old ones; entries of earlier builds are removed
   once per build (log: `DXBC shader cache: removed N entries`).
 
+### Build 212: probes for the GPU time that grows (log 2026-09-28 13:21)
+* Build 211 draws the indirect tessellation (`DXIL tessellation: 3117 drawn
+  (3117 indirect)`; every tessellation draw in gameplay is indirect). The
+  smears and dark specks over the bridge did not change, so they are not the
+  particles that were skipped.
+* The owner: 40-45 FPS at first, ~20 within seconds. The perf lines agree:
+  GPU per frame 17-18 ms -> 37 -> 42-44 ms (one window 61 ms) while the lists
+  stay the same (~60 draws a list, 600-list totals flat) -- the GPU's own work
+  grows. Best guess: a GPU-side count that is never reset (an append counter,
+  so ever more particles/instances are simulated and drawn), which would also
+  explain accumulating specks.
+* Build 212 adds `[probe]` lines: every 3 s per pipeline the first argument
+  record of each indirect draw/dispatch is copied (helper kernel
+  `mad_probe_words`) to the CPU-visible ring and the previous copy is logged.
+  A pipeline whose counts climb is the lead. madeira.cfg `ind-probe = 0`
+  turns it off; at most 1,500 lines.
+
 ### Build 211: indirect DXIL tessellation draws (the particles)
 The owner's screenshots (build 209) still show yellow brush-stroke smears and
 clusters of dark specks over the bridge, where the fires' smoke and embers

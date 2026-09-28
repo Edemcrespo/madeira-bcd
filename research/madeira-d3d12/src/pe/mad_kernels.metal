@@ -29,3 +29,14 @@ kernel void mad_tess_indirect_args(device const uint *args [[buffer(0)]],
     o[2] = 1;
     o[3] = 0;
 }
+
+// Diagnostics: copy the first n words of an argument record (indirect draw or
+// dispatch arguments the GPU wrote) to a CPU-visible ring, read seconds later.
+kernel void mad_probe_words(device const uint *src [[buffer(0)]],
+                            device uint *dst [[buffer(1)]],
+                            constant uint &n [[buffer(2)]],
+                            uint i [[thread_position_in_grid]])
+{
+    if (i < n)
+        dst[i] = src[i];
+}
