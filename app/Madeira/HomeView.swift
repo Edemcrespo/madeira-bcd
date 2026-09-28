@@ -421,6 +421,7 @@ struct HomeView: View {
     @Environment(\.scenePhase) private var scenePhase
     @ObservedObject private var controllers = GameControllerManager.shared
     @ObservedObject private var packs = UpdatePacks.shared
+    @ObservedObject private var shortcuts = ShortcutRouter.shared
     @AppStorage("wine_desktop_res") private var desktopRes = "960x540"
 
     @State private var games: [LibraryGame] = []
@@ -501,6 +502,8 @@ struct HomeView: View {
                 // flag whenever we come back to the foreground.
                 if phase == .active { jitOn = jit_check_debugged() }
             }
+            .onChange(of: shortcuts.pendingExe) { _, _ in launchPendingShortcut() }
+            .onChange(of: scannedOnce) { _, _ in launchPendingShortcut() }
             .sheet(item: $editing, onDismiss: { coverTick += 1 }) { game in
                 GameSettingsSheet(game: game, archs: archs,
                                   onPlay: { launch(game) },
@@ -736,6 +739,21 @@ struct HomeView: View {
         }
     }
 
+    /// madeira-bcd: a Home Screen shortcut (madeira://play?exe=...) starts its
+    /// game once the library knows it, through the same path as a tap.
+    private func launchPendingShortcut() {
+        guard scannedOnce, let want = shortcuts.pendingExe else { return }
+        shortcuts.pendingExe = nil
+        let key = want.lowercased()
+        guard let game = games.first(where: { $0.executables.contains { $0.windowsPath.lowercased() == key } }),
+              let exe = game.executables.first(where: { $0.windowsPath.lowercased() == key }) else {
+            LogStore.shared.log("[shortcut] \(want) is not in the library", level: .error)
+            return
+        }
+        LibraryPrefs.setPrimaryPath(exe.windowsPath, for: game.title)
+        launch(LibraryGame(title: game.title, executables: [exe]))
+    }
+
     private func launch(_ game: LibraryGame) {
         let exe = game.primary
         // Relocation-stripped exes based below 4 GB cannot load on iOS as they
@@ -958,6 +976,7 @@ struct GameSettingsSheet: View {
     @State private var gpuSync: String
     @State private var photo: PhotosPickerItem?
     @State private var tick = 0
+    @State private var copiedLink = false
 
     init(game: LibraryGame, archs: [String: String], onPlay: @escaping () -> Void, onCoverChanged: @escaping () -> Void) {
         self.game = game
@@ -1119,30 +1138,9 @@ struct GameSettingsSheet: View {
                          + "Larger costs frame rate. (Inside the Wine desktop the desktop size decides.)")
                 }
 
-                Section {
-                    choicePicker("MetalFX upscaling", $metalFX, GameProfile.metalFXChoices)
-                    choicePicker("FPS limit at start", $fpsLimit, GameProfile.fpsChoices)
-                    choicePicker("Tessellation detail (D3D12)", $tess, GameProfile.tessChoices)
-                    choicePicker("D3D12 command encoding", $submit, GameProfile.submitChoices)
-                    choicePicker("GPU sync (D3D12)", $gpuSync, GameProfile.gpuSyncChoices)
-                    NavigationLink {
-                        GameConfigEditor(profile: profile, onSave: { loadProfile() })
-                    } label: {
-                        Label("Advanced: this game's config", systemImage: "doc.text")
-                    }
-                } header: {
-                    Text("Graphics & performance")
-                } footer: {
-                    Text("MetalFX upscaling renders at the screen size above and sharpens the picture up to 1.5× "
-                         + "or 2× with Apple's scaler, so a small screen size (960x540, 1280x720) for frame rate "
-                         + "still looks crisp. FPS limit at start is the cap the session opens with; 30 or 40 "
-                         + "keeps the frame rate even when the phone warms up. Tessellation detail caps the D3D12 "
-                         + "runtime's low-detail tessellation (particles, grass); Full costs GPU time. "
-                         + "Command encoding on a worker thread takes the D3D12 runtime's own work off the "
-                         + "game's render thread. GPU sync \"Barriers only\" lets GPU passes overlap where the "
-                         + "game allows it (faster; if something flickers, go back). The advanced file takes any "
-                         + "madeira.cfg key or env.NAME line for this game only.")
-                }
+                graphicsSection
+
+                homeScreenSection
 
                 Section {
                     CoverArt(title: game.title, tick: tick)
@@ -1211,6 +1209,56 @@ struct GameSettingsSheet: View {
         .preferredColorScheme(.dark)
     }
 
+    private static let graphicsFooter = """
+        MetalFX upscaling renders at the screen size above and sharpens the picture up to 1.5× or 2× with \
+        Apple's scaler, so a small screen size (960x540, 1280x720) for frame rate still looks crisp. FPS limit \
+        at start is the cap the session opens with; 30 or 40 keeps the frame rate even when the phone warms up. \
+        Tessellation detail caps the D3D12 runtime's low-detail tessellation (particles, grass); Full costs GPU \
+        time. Command encoding on a worker thread takes the D3D12 runtime's own work off the game's render \
+        thread. GPU sync "Barriers only" lets GPU passes overlap where the game allows it (faster; if something \
+        flickers, go back). The advanced file takes any madeira.cfg key or env.NAME line for this game only.
+        """
+
+    private static let homeScreenFooter = """
+        In the Shortcuts app: new shortcut, Open URLs, paste the link, then Share > Add to Home Screen with the \
+        game's name and picture. The icon starts this exe the way a tap here does.
+        """
+
+    private var graphicsSection: some View {
+        Section {
+            choicePicker("MetalFX upscaling", $metalFX, GameProfile.metalFXChoices)
+            choicePicker("FPS limit at start", $fpsLimit, GameProfile.fpsChoices)
+            choicePicker("Tessellation detail (D3D12)", $tess, GameProfile.tessChoices)
+            choicePicker("D3D12 command encoding", $submit, GameProfile.submitChoices)
+            choicePicker("GPU sync (D3D12)", $gpuSync, GameProfile.gpuSyncChoices)
+            NavigationLink {
+                GameConfigEditor(profile: profile, onSave: { loadProfile() })
+            } label: {
+                Label("Advanced: this game's config", systemImage: "doc.text")
+            }
+        } header: {
+            Text("Graphics & performance")
+        } footer: {
+            Text(Self.graphicsFooter)
+        }
+    }
+
+    private var homeScreenSection: some View {
+        Section {
+            Button {
+                UIPasteboard.general.string = ShortcutRouter.link(for: exePath)
+                copiedLink = true
+            } label: {
+                Label(copiedLink ? "Link copied" : "Copy Home Screen shortcut link",
+                      systemImage: copiedLink ? "checkmark" : "link")
+            }
+        } header: {
+            Text("Home Screen")
+        } footer: {
+            Text(Self.homeScreenFooter)
+        }
+    }
+
     private func save() {
         LibraryPrefs.setPrimaryPath(exePath, for: game.title)
         GameArguments.set(args, for: exePath)
@@ -1255,6 +1303,8 @@ struct AppSettingsSheet: View {
                 }
 
                 UpdatesSection()
+
+                SavesSection()
 
                 StorageSection()
 

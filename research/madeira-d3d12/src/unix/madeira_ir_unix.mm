@@ -1385,11 +1385,13 @@ extern "C" int madeira_ir_convert_impl(struct madeira_ir_convert_args *a) {
      *   converted shader reads it only with this flag.
      * madeira-bcd (build 217), two more of the converter's D3D behaviours, for
      * Ghost of Tsushima's dark specks and smears around fire and smoke:
-     * - msc-sample-nan-zero: a texture sample that comes back NaN reads 0. The
-     *   game clears its RG16F velocity target to NaN as a "not written" marker
-     *   (see msc-strict-nan); a filtered read across such texels is NaN on
-     *   Metal, and a NaN that reaches the temporal resolve stays in its history
-     *   and spreads as black specks. D3D hardware does not hand those NaNs on.
+     * - msc-sample-nan-zero: NaN sampling COORDINATES are flushed to zero, as
+     *   D3D hardware treats them (man page: "Flush NaN sampling coordinates to
+     *   zero"); sampled values are untouched, so the game's isnan() tests on
+     *   its NaN-cleared velocity target (see msc-strict-nan) still work. A
+     *   reprojection uv - velocity over such a texel is NaN, Metal's result for
+     *   that sample is undefined, and a bad value that reaches the temporal
+     *   resolve stays in its history and spreads as black specks.
      * - msc-position-inf-nan: a vertex position of +-Inf becomes NaN, which
      *   Metal discards like D3D does. Particle systems kill particles by
      *   writing an infinite position; kept as Inf, Metal can rasterise a

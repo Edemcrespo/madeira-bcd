@@ -603,6 +603,16 @@ already did.
   the runtime replays command lists on a worker instead of inside the game's
   ExecuteCommandLists) and "GPU sync" (`fence-chain` 6 instead of 1); the
   overlay's F pill starts from the game's value.
+- Settings > Saves (`SavesAndShortcuts.swift`): "Back up saves" writes one
+  uncompressed zip (own writer, CRC-32) of every `C:\users\<name>`'s
+  Documents, Saved Games and AppData, skipping caches (Madeira, Temp,
+  ShaderCache, D3DSCache, NVIDIA, Microsoft, *cache*, logs) and files over
+  256 MB, and hands it to the share sheet; "Restore saves" unpacks such a zip
+  back into drive_c (only `users/...` entries, overwriting).
+- Home Screen shortcuts: `madeira://play?exe=<Windows path>` (CFBundleURLTypes
+  `madeira`) starts that exe through the library's own launch path once the
+  scan has found it (JIT first as usual). The game sheet copies the link; the
+  Shortcuts app's Open URLs + Add to Home Screen makes the icon.
 - Performance overlay: a thermal-state pill (OK / WARM / HOT / CRIT from
   `ProcessInfo.thermalState`); transitions are logged as `[thermal]` with the
   FPS at that moment, and every `[present]` line carries the state and low

@@ -647,6 +647,15 @@ tracked DLL and stay green).
   build and never lost the old ones; entries of earlier builds are removed
   once per build (log: `DXBC shader cache: removed N entries`).
 
+### Build 218: saves backup, Home Screen shortcuts, useResource dedup (2026-09-28)
+* `madeira_d3d12`: one useResource per resource and encoder (`mad_use_seen`,
+  `use-dedup`, default 1); a draw's entries are committed only after its
+  chain was encoded. The encode split line reports the skipped entries.
+* Settings > Saves (backup/restore zip) and `madeira://play?exe=...`
+  shortcuts (see docs/madeira-bcd.md, App).
+* 217 was CI verification only; the owner installs 218 (nothing had been
+  installed since 214).
+
 ### Build 217: GoT specks/smears flags, experiments in the sheet, storage (2026-09-28)
 Log analysis (13:21 and 14:04 logs, builds 211/212):
 * 13:21 "40-45 then 20 FPS": the `[perf] ml1108` GPU time per frame jumps
@@ -675,9 +684,8 @@ NaN-cleared velocity target into the temporal resolve, or particles killed
 with an infinite position. Build 217 turns on `IRCompatibilityFlagSampleNanToZero`
 and `IRCompatibilityFlagVertexPositionInfToNan` (`msc-sample-nan-zero`,
 `msc-position-inf-nan`, both default 1; the shader cache keys on them, so the
-first start converts again). Correction to the comment in
-`madeira_ir_unix.mm` (left as is so 217's native ABI stays stable; fix it
-with the next native change): SampleNanToZero flushes NaN sampling
+first start converts again). (The comment in
+`madeira_ir_unix.mm` was corrected in 218:) SampleNanToZero flushes NaN sampling
 COORDINATES to zero (man page), it does not rewrite sampled values -- the
 velocity NaN markers the game tests stay intact.
 
