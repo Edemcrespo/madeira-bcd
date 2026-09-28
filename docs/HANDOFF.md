@@ -623,6 +623,29 @@ tracked DLL and stay green).
   build and never lost the old ones; entries of earlier builds are removed
   once per build (log: `DXBC shader cache: removed N entries`).
 
+### Build 209: the 208 test (log 2026-09-28 09:31, video, 1564x720 "Fill")
+* **Smears with a still camera** (video, first 10 s: directional streaks and
+  blocky patches behind the cart, the "dark patches in the air"). The log had
+  `ClearUnorderedAccessViewUint on texture 'Texture' (view format 2 ...
+  values 0xbf800000 0x4cbebc20 0 0) is not supported; skipped`: an RGBA32
+  clear to (-1, 1e8, 0, 0), typical of a min/max depth or velocity tile
+  buffer, left uncleared. Texture UAV clears only took texels that repeat
+  every 4 bytes; the pattern buffers now repeat a 16-byte period, so 8- and
+  16-byte texels are cleared exactly (log: `UAV clear value ... exact pattern
+  buffer`). If the smears stay, the next suspects are the 4 clears on "a
+  texture view the runtime does not know" and the 4 skipped indirect draws on a
+  geometry-shader pipeline.
+* **C++ fix still not applied**: `[pc2fh] no zero padding in the last .text
+  page (000880c0..0008c000)`. On the device the tail of ntdll's last .text
+  page holds file bytes (raw size 0x80000 > VirtualSize 0x780a5), not zeros.
+  That range is outside every section, so the trampoline now goes at its
+  start regardless of content; the pool copy is only refused when its bytes
+  differ from the image's (another patch). Host test with a garbage tail:
+  patched at RVA 0x880c0, idempotent, refused with foreign pool bytes.
+* Water: DXIL tessellation now draws (`DXIL tessellation: ~1900 drawn`, no
+  REFUSED). GPU time at 1564x720 is 52-56 ms a frame (overlay), so at that
+  size the GPU is the limit (~15 FPS).
+
 ### Build 204: the three failures of the 203 test
 * **C++ exception fix not applied.** `[pc2fh]` refused with "padding in use":
   the trampoline went at the end of the section gap, which this binary uses.

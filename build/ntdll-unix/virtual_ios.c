@@ -5674,24 +5674,21 @@ int ios_patch_rtl_pc_to_file_header( void *module, const void *export_addr )
         memcpy( &va, sh + 40 * i + 12, 4 );
         if (va > sec_va && va < gap_end) gap_end = va;
     }
-    /* madeira-bcd: the trampoline goes in the zero tail of the section's LAST
-     * PAGE, the only padding the pool copy maps executable ("N .text pages
-     * executable" counts whole 16 KB pages). Build 203 used the end of the gap
-     * before the next section instead: outside those pages, and not zero on the
-     * device, so the patch was refused. */
+    /* madeira-bcd: the trampoline goes in the tail of the section's LAST PAGE,
+     * past its VirtualSize and before the next section: the only padding the
+     * pool copy maps executable ("N .text pages executable" counts whole 16 KB
+     * pages), and no section's virtual range, so nothing in the image refers
+     * to it. It is not zero on the device (build 208 log: the 16 KB mapping
+     * fills it from whatever follows .text in the file), so its content is not
+     * a test; the pool-side check below only refuses bytes another patcher
+     * changed. Build 203 used the end of the gap instead, outside the
+     * executable pages. */
     {
         uint32_t lo = ((sec_va + sec_vs + 15u) & ~15u) + 16u;
         uint32_t hi = (sec_va + sec_vs + 0x3fffu) & ~0x3fffu;
         if (hi > gap_end) hi = gap_end;
-        tramp_rva = 0;
-        for (i = lo; i + 48 <= hi; i += 16)
-        {
-            const unsigned char *z = img + i;
-            unsigned k;
-            for (k = 0; k < 48 && !z[k]; k++) ;
-            if (k == 48) { tramp_rva = i; break; }
-        }
-        if (!tramp_rva) { dprintf( 2, "[pc2fh] no zero padding in the last .text page (%08x..%08x) -- not patched\n", lo, hi ); return -1; }
+        if (lo + 48 > hi) { dprintf( 2, "[pc2fh] no room after .text in its last page (%08x..%08x) -- not patched\n", lo, hi ); return -1; }
+        tramp_rva = lo;
     }
 
     base_rx = ios_jit_translate_addr( module );
@@ -5710,8 +5707,18 @@ int ios_patch_rtl_pc_to_file_header( void *module, const void *export_addr )
                  body_rx, tw[0], tw[1], tw[2] );
         return -1;
     }
-    for (i = 0; i < 48; i++)
-        if (((const unsigned char *)tramp_rx)[i]) { dprintf( 2, "[pc2fh] padding at %p is in use -- not patched\n", tramp_rx ); return -1; }
+    /* The pool copy's bytes there must be what the image has (or zero): anything
+     * else means another patch already lives there. */
+    {
+        const unsigned char *pr = (const unsigned char *)tramp_rx, *ir = img + tramp_rva;
+        int zero = 1;
+        for (i = 0; i < 48; i++) if (pr[i]) { zero = 0; break; }
+        if (!zero && memcmp( pr, ir, 48 ))
+        {
+            dprintf( 2, "[pc2fh] padding at %p differs from the image -- in use, not patched\n", tramp_rx );
+            return -1;
+        }
+    }
 
     memcpy( tramp_rw, want_tramp, sizeof(want_tramp) );
     {

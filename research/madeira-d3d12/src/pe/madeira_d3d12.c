@@ -298,7 +298,7 @@ struct mad_device {
     unsigned ntheaps, theaps_cap;
     struct mad_hret { unsigned heap; UINT64 off, size, serial; } *hret; unsigned nhret, hret_cap;
     struct mad_mhret { obj_handle_t heap; UINT64 serial; void *mem; } *mhret; unsigned nmhret, mhret_cap;   /* ml1148: Metal heaps waiting for the GPU */
-    struct { UINT32 value; obj_handle_t buf; } fillpat[32]; unsigned nfillpat; SRWLOCK fillpat_lock;   /* ml1151: exact UAV clear patterns */
+    struct { UINT32 value[4]; obj_handle_t buf; } fillpat[32]; unsigned nfillpat; SRWLOCK fillpat_lock;   /* ml1151: exact UAV clear patterns (a 16-byte period) */
     LONG64 hp_live_bytes, hp_total_bytes; LONG hp_textures, hp_fallbacks;
     LUID adapter_luid;   /* madeira-bcd: GetAdapterLuid, the DXGI adapter it was created on */
 };
@@ -11287,24 +11287,31 @@ static void STDMETHODCALLTYPE list_SetComputeRoot32BitConstant(ID3D12GraphicsCom
  * buffer holding it repeated, kept per device for the few distinct values a
  * title uses. D3D12 clears raw and structured views with Values[0] per dword,
  * which is also exact for the R32 typed views these clears target. */
-static obj_handle_t mad_fill_pattern(struct mad_device *d, UINT32 v) {
+/* madeira-bcd: the buffer repeats a 16-byte period, so it also holds whole
+ * 8- and 16-byte texels (an RGBA32 clear to (-1, 1e8, 0, 0) was skipped). */
+static obj_handle_t mad_fill_pattern16(struct mad_device *d, const UINT32 v[4]) {
     obj_handle_t buf = 0; unsigned i;
     AcquireSRWLockExclusive(&d->fillpat_lock);
-    for (i = 0; i < d->nfillpat; i++) if (d->fillpat[i].value == v) { buf = d->fillpat[i].buf; break; }
+    for (i = 0; i < d->nfillpat; i++) if (!memcmp(d->fillpat[i].value, v, 16)) { buf = d->fillpat[i].buf; break; }
     if (!buf && d->nfillpat < (sizeof d->fillpat / sizeof d->fillpat[0])) {
         struct WMTBufferInfo bi;
         memset(&bi, 0, sizeof bi); bi.length = MAD_FILLPAT_BYTES; bi.options = WMTResourceStorageModeShared;
         buf = MTLDevice_newBuffer(d->mtl_device, &bi);
         if (buf && bi.memory.ptr) {
             UINT32 *w = (UINT32 *)bi.memory.ptr; UINT64 k;
-            for (k = 0; k < MAD_FILLPAT_BYTES / 4; k++) w[k] = v;
+            for (k = 0; k < MAD_FILLPAT_BYTES / 4; k++) w[k] = v[k & 3];
             mad_resident(d, buf);
-            d->fillpat[d->nfillpat].value = v; d->fillpat[d->nfillpat].buf = buf; d->nfillpat++;
-            d3d12_log("[madeira-d3d12] ml1151 UAV clear value %#x: exact pattern buffer %u of %u\n", v, d->nfillpat, (unsigned)(sizeof d->fillpat / sizeof d->fillpat[0]));
+            memcpy(d->fillpat[d->nfillpat].value, v, 16); d->fillpat[d->nfillpat].buf = buf; d->nfillpat++;
+            d3d12_log("[madeira-d3d12] ml1151 UAV clear value %#x %#x %#x %#x: exact pattern buffer %u of %u\n",
+                      v[0], v[1], v[2], v[3], d->nfillpat, (unsigned)(sizeof d->fillpat / sizeof d->fillpat[0]));
         } else if (buf) { NSObject_release(buf); buf = 0; }
     }
     ReleaseSRWLockExclusive(&d->fillpat_lock);
     return buf;
+}
+static obj_handle_t mad_fill_pattern(struct mad_device *d, UINT32 v) {
+    UINT32 k[4] = { v, v, v, v };
+    return mad_fill_pattern16(d, k);
 }
 /* madeira-bcd: one texel of a UAV clear in the view's format. Uint clears
  * copy each value's low bits into its channel (no conversion); float clears
@@ -11408,7 +11415,7 @@ static UINT mad_pack_clear(DXGI_FORMAT fmt, const UINT32 v[4], int is_float, uns
 static obj_handle_t mad_fill_pattern(struct mad_device *d, UINT32 v);
 static void mad_record_uav_tex_clear(struct mad_list *l, UINT64 view_id, struct mad_resource *res, const UINT32 v[4], int is_float, const char *what) {
     static unsigned said_miss, said_fmt, said_ok;
-    struct mad_uavtex u; unsigned char px[16]; UINT bpp, rbytes = 0, rblock = 0; UINT32 pat, w[4];
+    struct mad_uavtex u; unsigned char px[16]; UINT bpp, rbytes = 0, rblock = 0; UINT32 pat, w[4], per[4];
     obj_handle_t pattern; struct mad_cmd *c;
     if (!mad_uavtex_get(view_id, &u) || !u.res || (res && u.res != res) || !u.res->texture) {
         if (said_miss++ < 4) d3d12_log("[madeira-d3d12] %s on a texture view the runtime does not know; skipped\n", what);
@@ -11420,15 +11427,19 @@ static void mad_record_uav_tex_clear(struct mad_list *l, UINT64 view_id, struct 
     memcpy(w, px, 16);
     if (bpp == 1) pat = px[0] * 0x01010101u;
     else if (bpp == 2) { pat = (UINT32)px[0] | ((UINT32)px[1] << 8); pat |= pat << 16; }
-    else if (bpp == 4 || (bpp == 8 && w[0] == w[1]) || (bpp == 16 && w[0] == w[1] && w[1] == w[2] && w[2] == w[3])) pat = w[0];
+    else if (bpp == 4 || bpp == 8 || bpp == 16) pat = w[0];
     else bpp = 0;
+    /* the 16-byte period the pattern buffer repeats */
+    if (bpp == 8) { per[0] = w[0]; per[1] = w[1]; per[2] = w[0]; per[3] = w[1]; }
+    else if (bpp == 16) memcpy(per, w, 16);
+    else per[0] = per[1] = per[2] = per[3] = pat;
     if (!bpp) {
         if (said_fmt++ < 8)
             d3d12_log("[madeira-d3d12] %s on texture '%s' (view format %u, %u samples, values %#x %#x %#x %#x) is not supported; skipped\n",
                       what, u.res->name ? u.res->name : "?", (unsigned)u.fmt, u.res->samples, v[0], v[1], v[2], v[3]);
         return;
     }
-    pattern = mad_fill_pattern(l->device, pat);
+    pattern = mad_fill_pattern16(l->device, per);
     if (!pattern) return;
     c = mad_list_push(l, MC_FILL_TEX);
     if (!c) return;
