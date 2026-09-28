@@ -72,7 +72,11 @@ Upstream PRs merged into the fork (not yet merged upstream):
   (Swift/ObjC, ntdll-unix, winemetal unix, madeira_cfg.h, DXMT patches) still
   needs the IPA build -- and after it, packs are built against the new ABI.
   If a workflow change alters the native build, bump `EPOCH` in
-  `tools/native-abi.sh`. The `packs` release holds only DLLs built from this
+  `tools/native-abi.sh`. The hash is over git blobs, so ANY edit to a native
+  file (a comment too) makes packs built afterwards refuse the installed app:
+  batch native edits into the next IPA rather than touching them between
+  builds. Check with `tools/native-abi.sh` against the app's value
+  (Settings > Updates shows it). The `packs` release holds only DLLs built from this
   repository (never an IPA, Apple's converter or Microsoft's runtime).
 * **Per-game config:** Settings sheet of a game > "Advanced: this game's
   config" edits `Application Support/GameConfigs/<hash>.cfg` (madeira.cfg
