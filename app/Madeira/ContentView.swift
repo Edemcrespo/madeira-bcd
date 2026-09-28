@@ -174,8 +174,14 @@ final class MetalBackedView: UIView {
         if !Self.layerRegistered {
             Self.layerRegistered = true
             madeira_display_set_layer(host.metalLayer)
+            // The direct-launch GDI overlay and drawn cursor are sublayers of
+            // this same layer. Without it Winios never builds the overlay, so
+            // a game's launcher or dialog (plain GDI windows, e.g. Ghost of
+            // Tsushima's launcher) stays dark and cannot be tapped.
+            winios_set_game_layer(Unmanaged.passUnretained(host.metalLayer).toOpaque())
             LogStore.shared.log("MetalLayer registered with DXMT shim (window-hosted singleton)", level: .success)
         }
+        publishGameRect()
     }
 
     override func layoutSubviews() {
@@ -184,7 +190,21 @@ final class MetalBackedView: UIView {
             MetalHostView.shared.frame = convert(gameRect(), to: w)
             let full = convert(bounds, to: w)
             winios_set_compositor_frame(full.minX, full.minY, full.width, full.height)
+            publishGameRect()
         }
+    }
+
+    /// Tell Winios the rect the game surface occupies, so GDI windows and the
+    /// drawn cursor use the same guest-pixel scale as the touch mapping.
+    /// Only on a change: layoutSubviews repeats identical frames.
+    private static var publishedRect = CGSize.zero
+    private func publishGameRect() {
+        let r = gameRect().size
+        guard r != Self.publishedRect else { return }
+        Self.publishedRect = r
+        winios_set_game_rect(Double(r.width), Double(r.height))
+        winios_overlay_relayout()
+        winios_cursor_relayout()
     }
 
     // Map touch point in view-local UI points to the 1024×768 logical

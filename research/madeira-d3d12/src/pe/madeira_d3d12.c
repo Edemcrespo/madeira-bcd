@@ -10455,10 +10455,21 @@ static void mad_dtess_convert(struct mad_device *d, struct mad_rootsig *rs, stru
     if (!L) return;
     memset(&r, 0, sizeof r);
     mad_build_input_layout(desc, p, L);
-    memset(&ov, 0, sizeof ov); ov.gs_emulation = 1; ov.topology = (UINT)desc->PrimitiveTopologyType; ov.layout = L->n ? L : NULL;
+    /* Build 203 on the device: the vertex shader of a hull pipeline has only the
+     * object variant ("<name>.dxil_irconverter_object_shader", specialised when
+     * the pipeline is built) -- "converted library has no function
+     * 'ls_SetColor'" -- so its library is the result, like the hull's and the
+     * domain's; and a vertex stage without an input layout (water grids built
+     * from SV_VertexID) still needs a stage-in function to link, so the layout
+     * goes along even when it is empty. */
+    memset(&ov, 0, sizeof ov); ov.gs_emulation = 1; ov.topology = (UINT)desc->PrimitiveTopologyType; ov.layout = L;
     ov.lib2_out = &p->si_lib; ov.vs_output_size = &p->gs_vertex_size; ov.name_out = p->vs_name; ov.name_cap = sizeof p->vs_name;
-    p->vs_fn = mad_convert_stage_opts(d, rs, desc->VS.pShaderBytecode, desc->VS.BytecodeLength, NULL, &p->vs_lib, "VS(dxil tess)",
-                                      vsin, 32, nvsin, NULL, locs, &nl, &ov);
+    ov.lib_only = 1;
+    {
+        obj_handle_t vl = mad_convert_stage_opts(d, rs, desc->VS.pShaderBytecode, desc->VS.BytecodeLength, NULL, &p->vs_lib, "VS(dxil tess)",
+                                                 vsin, 32, nvsin, NULL, locs, &nl, &ov);
+        if (vl) { NSObject_retain(vl); p->vs_fn = vl; }   /* vs_fn and vs_lib are released separately */
+    }
     if (p->vs_fn) mad_apply_reflected_layout(p, rs, locs, nl, "VS");
     memset(&oh, 0, sizeof oh); oh.gs_emulation = 1; oh.topology = (UINT)desc->PrimitiveTopologyType;
     oh.lib_only = 1; oh.dtess = &r; oh.name_out = hname; oh.name_cap = sizeof hname; hname[0] = 0;

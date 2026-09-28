@@ -447,6 +447,12 @@ already did.
 - `HomeView.swift`: a library-first home screen (games with covers and
   per-game settings, the Windows desktop, test programs, settings). The
   original panel is still there under Settings > Developer tools.
+- `ContentView.swift` (MetalBackedView) hands Winios the game's CAMetalLayer
+  (`winios_set_game_layer`) and publishes the game rect on every change
+  (`winios_set_game_rect`, `winios_overlay_relayout`, `winios_cursor_relayout`).
+  Upstream's Swift side of the direct-launch GDI overlay was never merged, so
+  a directly launched game's plain GDI windows (Ghost of Tsushima's launcher,
+  message boxes, choosers) had no host layer and stayed dark.
 - `GameControllerManager.swift`: physical controllers mapped to keyboard and
   mouse (ported from SaimSuhailQu/Madeira 72ca339). Since upstream #22 hands
   pads to games as real XInput controllers (`GamepadInput.swift`), this

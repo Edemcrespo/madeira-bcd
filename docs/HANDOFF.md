@@ -301,15 +301,13 @@ Note: `C:\madeira-cs\fault-shaders.txt` keeps hash 34c565ac8322ab2a, so every
 launch logs that shader's bytecode once (harmless, ~8 log lines); delete the
 file in the Wine prefix to stop it.
 
-### Open issues, roughly in priority order (updated overnight 2026-09-27/28)
-Waiting for the owner's device test of build 203 (= 201 + pipeline-creation
-timing; same shader-cache identity as 201/202), which carries everything
-from the night: C++ exception crash after a save (196), shader cache kept
-across builds (197), MSC flags for the slight artefacts (198), DXIL
-tessellation / water and one mkdir per cache bucket (199), compute-shader
-dumps opt-in with the old ones deleted and the DXBC cache of earlier builds
-removed (201; run 200 was cancelled by 201's dispatch).
-1. **Verify 203 on the device** (`pso time (...)` lines say how much of
+### Open issues, roughly in priority order (updated 2026-09-28 morning)
+Build 203 was tested on the device (log `GhostOfTsushima.exe-2026-09-28_07-42-33.txt`):
+the C++ fix was NOT applied (`[pc2fh] ... padding in use`), the water pipelines
+failed at the vertex shader, the launcher stayed dark, the owner saw broken
+rocks and occasional dark patches in the air. Build 204 fixes the first three
+(see "Build 204" below); the rocks need a close-up screenshot.
+1. **Verify 204 on the device** (`pso time (...)` lines say how much of
    "Compiling shaders" is Madeira's): `[pc2fh]` at start-up and no VCRUNTIME140_1
    crash after saving; `shader cache ON ... identity 'madeira_d3d12 bc1
    converter <hex>'` and mostly hits on the second launch; `[madeira-ir] MSC
@@ -335,7 +333,8 @@ removed (201; run 200 was cancelled by 201's dispatch).
    file is the backing store; D3D12 lets the app free its bytecode, so keep
    the cache key, never a pointer). If conversion dominates: one packed cache
    file with an index instead of ~30k files.
-5. The launcher window stays dark until Enter is pressed.
+5. The launcher window stayed dark until Enter / gamepad X was pressed -- fixed
+   in 204 (the direct-launch GDI overlay was never given its host layer).
 6. `DXGIFactory::EnumAdapterByLuid` not implemented (Streamline only);
    non-occlusion queries resolve to zero; `ResolveQueryData` into GPU-only
    buffers is not delivered.
@@ -623,3 +622,24 @@ tracked DLL and stay green).
 * The unix DXBC cache (`Documents/shadercache/*.mdsc`) got a fresh set per
   build and never lost the old ones; entries of earlier builds are removed
   once per build (log: `DXBC shader cache: removed N entries`).
+
+### Build 204: the three failures of the 203 test
+* **C++ exception fix not applied.** `[pc2fh]` refused with "padding in use":
+  the trampoline went at the end of the section gap, which this binary uses.
+  It now goes in the first 48 zero bytes after `.text`'s end inside the last
+  executable 16 KB page (verified offline against the real
+  vcruntime140_1.dll: RVA 0x880d0). Log: `[pc2fh] ... now maps`.
+* **Water: VS conversion.** `converted library has no function
+  'ls_Main_techWaterMain'` / `no stage-in library`: the tessellation VS is now
+  converted library-only (the function is looked up by the object-shader name
+  in winemetal) and always gets the input layout for its stage-in function.
+* **Dark launcher.** The launcher is an ordinary GDI window (790x445
+  StretchDIBits, `[winios] present hwnd=... surf=896x512`), and its bits did
+  reach Winios -- but `ContentView.swift` never called
+  `winios_set_game_layer` / `winios_set_game_rect` (upstream's Swift side of
+  the direct-launch overlay was never merged), so the overlay host was never
+  created: no `[overlay] created host=` line in any log. MetalBackedView now
+  publishes the layer once and the game rect on every change (with the two
+  relayout hooks). The launcher should show and take taps; the overlay also
+  arms win32u's 16 ms message poll while it is visible. `MADEIRA_DIRECT_OVERLAY=0`
+  turns the overlay off.

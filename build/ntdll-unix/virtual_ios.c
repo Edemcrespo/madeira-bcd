@@ -5674,8 +5674,25 @@ int ios_patch_rtl_pc_to_file_header( void *module, const void *export_addr )
         memcpy( &va, sh + 40 * i + 12, 4 );
         if (va > sec_va && va < gap_end) gap_end = va;
     }
-    tramp_rva = (gap_end - 64) & ~15u;
-    if (tramp_rva < sec_va + sec_vs + 16) { dprintf( 2, "[pc2fh] no padding after the section -- not patched\n" ); return -1; }
+    /* madeira-bcd: the trampoline goes in the zero tail of the section's LAST
+     * PAGE, the only padding the pool copy maps executable ("N .text pages
+     * executable" counts whole 16 KB pages). Build 203 used the end of the gap
+     * before the next section instead: outside those pages, and not zero on the
+     * device, so the patch was refused. */
+    {
+        uint32_t lo = ((sec_va + sec_vs + 15u) & ~15u) + 16u;
+        uint32_t hi = (sec_va + sec_vs + 0x3fffu) & ~0x3fffu;
+        if (hi > gap_end) hi = gap_end;
+        tramp_rva = 0;
+        for (i = lo; i + 48 <= hi; i += 16)
+        {
+            const unsigned char *z = img + i;
+            unsigned k;
+            for (k = 0; k < 48 && !z[k]; k++) ;
+            if (k == 48) { tramp_rva = i; break; }
+        }
+        if (!tramp_rva) { dprintf( 2, "[pc2fh] no zero padding in the last .text page (%08x..%08x) -- not patched\n", lo, hi ); return -1; }
+    }
 
     base_rx = ios_jit_translate_addr( module );
     if ((uintptr_t)base_rx == base || (uintptr_t)base_rx < rx_lo || (uintptr_t)base_rx - rx_lo >= ios_jit_pool_size_global) return -1;
@@ -5693,7 +5710,7 @@ int ios_patch_rtl_pc_to_file_header( void *module, const void *export_addr )
                  body_rx, tw[0], tw[1], tw[2] );
         return -1;
     }
-    for (i = 0; i < 32; i++)
+    for (i = 0; i < 48; i++)
         if (((const unsigned char *)tramp_rx)[i]) { dprintf( 2, "[pc2fh] padding at %p is in use -- not patched\n", tramp_rx ); return -1; }
 
     memcpy( tramp_rw, want_tramp, sizeof(want_tramp) );
