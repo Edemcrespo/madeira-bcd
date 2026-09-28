@@ -623,6 +623,17 @@ tracked DLL and stay green).
   build and never lost the old ones; entries of earlier builds are removed
   once per build (log: `DXBC shader cache: removed N entries`).
 
+### Build 214: upstream sync (2026-09-28)
+Merged willfaust/madeira 9e9dfb6, e39be62, 735e323. Upstream vendors the
+Metal Shader Converter 4.0 beta 2 public headers under
+research/madeira-d3d12/third_party/metal-shader-converter and deps.sh now
+hash-checks them and the tracked iOS library. Our CI does not go through
+deps.sh: build/dxmt-ios/build.sh (kept ours) takes MADEIRA_MSC_INCLUDE, the
+4.0.1 headers staged from the msc-private draft release, and keeps the stub
+fallback instead of upstream's hard stop. Upstream moved the wine pin to
+willfaust/wine d2808652; 125hz pr/wow64-core does not contain it, so the
+pin stays at c9c186e. Build 214 green.
+
 ### Build 213: particle tessellation cap; the loading-screen freeze
 * `[probe]` (log 2026-09-28 14:04) settles the FPS drop: the particle draws
   (`ls_SetColor`, `vs_SetColor`, `vs_SetColorCombinedAlpha`, 4 vertices x N
