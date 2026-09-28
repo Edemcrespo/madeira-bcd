@@ -53,10 +53,25 @@ scid_inputs() {
 SCID=$(cd "$R" && scid_inputs | shasum -a 256 | cut -c1-16)
 echo "  shader cache converter identity $SCID"
 
+# madeira-bcd: helper kernels (mad_kernels.metal) as an embedded metallib. A
+# build without xcrun (or a failed compile) leaves them out; the runtime then
+# skips the draws that need them, as before.
+echo "=== helper kernels (metallib) ==="
+KDEF=""
+if command -v xcrun > /dev/null 2>&1 &&
+   xcrun -sdk iphoneos metal -std=metal3.0 -o "$OUT/mad_kernels.metallib" "$SRC/mad_kernels.metal" 2> "$OUT/mad_kernels.err"; then
+    (cd "$OUT" && xxd -i mad_kernels.metallib > mad_kernels_metallib.h)
+    KDEF="-DMAD_HAVE_KERNELS"
+    echo "  $(wc -c < "$OUT/mad_kernels.metallib" | tr -d ' ') bytes"
+else
+    echo "::warning::helper kernels did not build -- indirect tessellation draws stay skipped"
+    cat "$OUT/mad_kernels.err" 2> /dev/null | head -20 || true
+fi
+
 echo "=== madeira_d3d12.dll (arm64ec) ==="
-"$MINGW/arm64ec-w64-mingw32-clang" -shared -O2 -Wall -DMAD_SC_CONVERTER_ID="\"$SCID\"" \
+"$MINGW/arm64ec-w64-mingw32-clang" -shared -O2 -Wall -DMAD_SC_CONVERTER_ID="\"$SCID\"" $KDEF \
     -o "$OUT/madeira_d3d12.dll" "$SRC/madeira_d3d12.c" "$SRC/d3d12.def" \
-    -I"$SRC" -I"$R/research/madeira-d3d12/src" -I"$R/research/dxmt/src/winemetal" \
+    -I"$SRC" -I"$OUT" -I"$R/research/madeira-d3d12/src" -I"$R/research/dxmt/src/winemetal" \
     -L"$OUT" -lwinemetal -luuid -lole32 2> "$OUT/madeira_d3d12.err" \
     || { grep -m 20 "error:" "$OUT/madeira_d3d12.err"; exit 1; }
 echo "  built $(wc -c < "$OUT/madeira_d3d12.dll" | tr -d ' ') bytes (tracked: $(wc -c < "$SHIP/madeira_d3d12.dll" | tr -d ' '))"

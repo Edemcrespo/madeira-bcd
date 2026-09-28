@@ -623,6 +623,29 @@ tracked DLL and stay green).
   build and never lost the old ones; entries of earlier builds are removed
   once per build (log: `DXBC shader cache: removed N entries`).
 
+### Build 211: indirect DXIL tessellation draws (the particles)
+The owner's screenshots (build 209) still show yellow brush-stroke smears and
+clusters of dark specks over the bridge, where the fires' smoke and embers
+are. The tessellation pipelines in use are the water and `ls_SetColor` /
+`ps_SetColor_MultiLight`: 4-control-point patches, max factor 9 -- lit
+particle quads -- and ~2,700 of their draws a run came through ExecuteIndirect
+(GPU-driven particles) and were skipped. Build 211 draws them:
+* `research/madeira-d3d12/src/pe/mad_kernels.metal` (kernel
+  `mad_tess_indirect_args`) is compiled to a metallib by
+  `tools/build-madeira-d3d12-dll.sh` (`xcrun -sdk iphoneos metal`) and embedded
+  (`-DMAD_HAVE_KERNELS`, `mad_kernels_metallib.h`). Without xcrun the DLL
+  builds without it and those draws stay skipped (log: `helper kernels: not
+  built in`).
+* Before such an ExecuteIndirect the render pass is split and one compute
+  pass turns each argument record into MTLDispatchThreadgroupsIndirectArguments
+  (ceil(count / (patches per object threadgroup x control points)) x instance
+  count) in a 4 MB shared ring; each record is then drawn with
+  `drawMeshThreadgroupsWithIndirectBuffer`, the D3D record bound at index 4
+  for the object stage as for direct draws. tools/patch-dxmt-dxil-tess.py sets
+  the object threadgroup memory for the indirect mesh draw too.
+* Log: `helper kernels: ready ...`, `indirect tessellation: N record(s) ...`,
+  and `DXIL tessellation: N drawn (M indirect)` in the ml1050 line.
+
 ### Build 210: the 209 test (log 2026-09-28 10:13, video)
 * The C++ fix is applied (`[pc2fh] ... now maps`); the owner saved five
   times without a crash. The RGBA32 clear is exact now (`UAV clear value

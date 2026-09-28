@@ -22,7 +22,8 @@ This patch gives winemetal what the runtime needs for it:
 - winemetal_unix.c: a mesh draw whose reserved[1] is 0x7e55 sets the object
   threadgroup memory length from reserved[0] first (the converter's draw helpers
   set 15360 bytes at index 0). Every producer memsets its commands, so reserved
-  was zero before.
+  was zero before. The indirect mesh draw does the same (indirect DXIL
+  tessellation draws, whose grid a helper kernel computes on the GPU).
 
 Idempotent; fails by name if an anchor moves. Run from the repository root.
 """
@@ -135,6 +136,19 @@ DRAW_NEW = """    case WMTRenderCommandDrawMeshThreadgroups: {
         [encoder setObjectThreadgroupMemoryLength:body->reserved[0] atIndex:0];
       [encoder drawMeshThreadgroups:MTLSizeMake("""
 
+DRAWI_OLD = """    case WMTRenderCommandDrawMeshThreadgroupsIndirect: {
+      struct wmtcmd_render_draw_meshthreadgroups_indirect *body =
+          (struct wmtcmd_render_draw_meshthreadgroups_indirect *)next;
+      [encoder drawMeshThreadgroupsWithIndirectBuffer:"""
+
+DRAWI_NEW = """    case WMTRenderCommandDrawMeshThreadgroupsIndirect: {
+      struct wmtcmd_render_draw_meshthreadgroups_indirect *body =
+          (struct wmtcmd_render_draw_meshthreadgroups_indirect *)next;
+      /* madeira-bcd: DXIL tessellation, indirect (same marker as the direct draw) */
+      if (body->reserved[1] == 0x7e55 && body->reserved[0])
+        [encoder setObjectThreadgroupMemoryLength:body->reserved[0] atIndex:0];
+      [encoder drawMeshThreadgroupsWithIndirectBuffer:"""
+
 
 def patch(path, pairs):
     s = path.read_text()
@@ -153,7 +167,7 @@ def patch(path, pairs):
 
 def main():
     rc = patch(HDR, [(HDR_OLD, HDR_NEW)])
-    rc |= patch(UNIX, [(BUILD_OLD, BUILD_NEW), (DRAW_OLD, DRAW_NEW)])
+    rc |= patch(UNIX, [(BUILD_OLD, BUILD_NEW), (DRAW_OLD, DRAW_NEW), (DRAWI_OLD, DRAWI_NEW)])
     return rc
 
 

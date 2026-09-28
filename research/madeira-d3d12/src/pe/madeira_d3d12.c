@@ -299,13 +299,14 @@ struct mad_device {
     struct mad_hret { unsigned heap; UINT64 off, size, serial; } *hret; unsigned nhret, hret_cap;
     struct mad_mhret { obj_handle_t heap; UINT64 serial; void *mem; } *mhret; unsigned nmhret, mhret_cap;   /* ml1148: Metal heaps waiting for the GPU */
     struct { UINT32 value[4]; obj_handle_t buf; } fillpat[32]; unsigned nfillpat; SRWLOCK fillpat_lock;   /* ml1151: exact UAV clear patterns (a 16-byte period) */
+    obj_handle_t k_lib, k_tind_pso, k_ring; UINT64 k_ring_pos; int k_state; SRWLOCK k_lock;   /* madeira-bcd: helper kernels (mad_kernels.metal) */
     LONG64 hp_live_bytes, hp_total_bytes; LONG hp_textures, hp_fallbacks;
     LUID adapter_luid;   /* madeira-bcd: GetAdapterLuid, the DXGI adapter it was created on */
 };
 static LONG g_tview_live, g_tview_made, g_xview_live;   /* ml1126 */
 static LONG g_resolve_locked, g_resolve_miss;   /* ml1132: address lookups that took live_lock */
 static LONG g_res_added, g_res_removed, g_tess_psos, g_tess_draws, g_tess_built, g_tess_drawn, g_tess_nonidx;
-static volatile LONG g_dtess_drawn, g_dtess_bad_cps;   /* madeira-bcd: DXIL tessellation */
+static volatile LONG g_dtess_drawn, g_dtess_bad_cps, g_dtess_ind_drawn;   /* madeira-bcd: DXIL tessellation */
 static LONG g_gs_built, g_gs_drawn;   /* ml1147 */
 static LONG g_vis_begun, g_vis_resolved, g_vis_nonzero, g_vis_restarts;   /* ml1088 */
 static LONG g_srv_clamped; static float g_srv_clamp_max;   /* ml1089 */
@@ -512,9 +513,9 @@ static void mad_skip_report(void) {
               g_fence_waits, g_fence_updates, g_barriers, g_barrier_renc_closed, g_zero_inst, g_stencil_srv);
     mad_acct_report();
     d3d12_log("[madeira-d3d12] ml1050 residency set: %ld added, %ld removed (%ld members); tessellation: %ld pipelines (%ld built as mesh pipelines), "
-              "%ld draws dropped, %ld drawn (%ld non-indexed); ml1147 DXBC geometry: %ld mesh pipelines, %ld draws; DXIL tessellation: %ld drawn\n",
+              "%ld draws dropped, %ld drawn (%ld non-indexed); ml1147 DXBC geometry: %ld mesh pipelines, %ld draws; DXIL tessellation: %ld drawn (%ld indirect)\n",
               g_res_added, g_res_removed, g_res_added - g_res_removed, g_tess_psos, g_tess_built,
-              g_tess_draws, g_tess_drawn, g_tess_nonidx, g_gs_built, g_gs_drawn, g_dtess_drawn);   /* ml1083, ml1147, madeira-bcd */
+              g_tess_draws, g_tess_drawn, g_tess_nonidx, g_gs_built, g_gs_drawn, g_dtess_drawn, g_dtess_ind_drawn);   /* ml1083, ml1147, madeira-bcd */
     d3d12_log("[madeira-d3d12] ml1126 views: %ld typed-buffer views live (%ld made; kept OUT of the residency set, their buffer is in it), %ld texture views live\n",
               g_tview_live, g_tview_made, g_xview_live);
     d3d12_log("[madeira-d3d12] ml1132 address lookups on the locked path: %ld (true misses %ld); every other lookup was lock-free\n",
@@ -1365,6 +1366,7 @@ static ULONG STDMETHODCALLTYPE queue_Release(ID3D12CommandQueue *This) {
 /* ---- execution: replaying a list into Metal encoders -------------------- */
 struct mad_exec {
     int fence_needed;
+    obj_handle_t tind_buf; UINT64 tind_off;   /* madeira-bcd: this indirect tessellation draw's mesh dispatch arguments */
     struct mad_resource *wr[64]; unsigned nwr; int wr_all;   /* ml1116: written since the last fence wait (mode 3) */   /* ml1111: fence-chain = 2: a barrier (or list start) was seen since the last wait */
     struct mad_queue *q;
     struct mad_list *l;
@@ -3222,6 +3224,64 @@ static void mad_gs_draw(UINT pt, UINT vertex_size, UINT max_prims, UINT instance
  * `mesh_prims` tessellated primitives. Every patch list is
  * IRRuntimePrimitiveTypeTriangle to the converter. */
 #define MAD_DTESS_OBJECT_TG_MEM 15360u   /* the helpers' setObjectThreadgroupMemoryLength:15360 atIndex:0 */
+
+/* madeira-bcd: HELPER KERNELS. Indirect tessellation draws need their object
+ * threadgroup count from arguments the GPU wrote (Ghost of Tsushima's
+ * GPU-driven particles, ~2,700 draws a run, were skipped). mad_kernels.metal
+ * is compiled to a metallib in CI (tools/build-madeira-d3d12-dll.sh) and
+ * embedded; its kernel turns each D3D12 argument record into
+ * MTLDispatchThreadgroupsIndirectArguments in a shared ring. Without the
+ * metallib (a local build) those draws stay skipped. */
+#ifdef MAD_HAVE_KERNELS
+#include "mad_kernels_metallib.h"
+#endif
+#define MAD_KRING_BYTES (4u << 20)
+static int mad_kernels_ready(struct mad_device *d) {
+    if (d->k_state) return d->k_state > 0;
+    AcquireSRWLockExclusive(&d->k_lock);
+    if (!d->k_state) {
+#ifdef MAD_HAVE_KERNELS
+        /* a heap copy, as the converter's libraries are made from (not a pointer into this image) */
+        void *img = malloc(mad_kernels_metallib_len);
+        obj_handle_t dd = 0, err = 0, fn = 0;
+        struct WMTComputePipelineInfo ci; struct WMTBufferInfo bi;
+        if (img) { memcpy(img, mad_kernels_metallib, mad_kernels_metallib_len); dd = DispatchData_alloc_init((uint64_t)(uintptr_t)img, (uint64_t)mad_kernels_metallib_len); }
+        if (dd) { d->k_lib = MTLDevice_newLibrary(d->mtl_device, dd, &err); NSObject_release(dd); }
+        free(img);
+        if (err) mad_log_nserror("helper kernels", err);
+        if (d->k_lib) fn = MTLLibrary_newFunction(d->k_lib, "mad_tess_indirect_args");
+        if (fn) {
+            memset(&ci, 0, sizeof ci); ci.compute_function = fn; err = 0;
+            d->k_tind_pso = MTLDevice_newComputePipelineState(d->mtl_device, &ci, &err);
+            if (err) mad_log_nserror("mad_tess_indirect_args", err);
+            NSObject_release(fn);
+        }
+        memset(&bi, 0, sizeof bi); bi.length = MAD_KRING_BYTES; bi.options = WMTResourceStorageModeShared;
+        if (d->k_tind_pso) d->k_ring = MTLDevice_newBuffer(d->mtl_device, &bi);
+        if (d->k_ring) mad_resident(d, d->k_ring);
+        d->k_state = d->k_tind_pso && d->k_ring ? 1 : -1;
+        d3d12_log("[madeira-d3d12] helper kernels: %s (library %d, indirect tessellation kernel %d, ring %d)\n",
+                  d->k_state > 0 ? "ready" : "NOT available", !!d->k_lib, !!d->k_tind_pso, !!d->k_ring);
+#else
+        d->k_state = -1;
+        d3d12_log("[madeira-d3d12] helper kernels: not built in (no metallib); indirect tessellation draws are skipped\n");
+#endif
+    }
+    ReleaseSRWLockExclusive(&d->k_lock);
+    return d->k_state > 0;
+}
+/* A 256-byte-aligned range of the ring. The GPU consumes a range long before
+ * the ring comes round again (4 MB at 16 bytes a record). */
+static UINT64 mad_kring_alloc(struct mad_device *d, UINT64 bytes) {
+    UINT64 off;
+    bytes = (bytes + 255) & ~(UINT64)255;
+    if (bytes > MAD_KRING_BYTES) return ~(UINT64)0;
+    AcquireSRWLockExclusive(&d->k_lock);
+    if (d->k_ring_pos + bytes > MAD_KRING_BYTES) d->k_ring_pos = 0;
+    off = d->k_ring_pos; d->k_ring_pos += bytes;
+    ReleaseSRWLockExclusive(&d->k_lock);
+    return off;
+}
 static void mad_ts_draw(const struct mad_pso *p, UINT instances, UINT count, UINT16 index_type, UINT64 index_buffer,
                         struct mad_gs_drawinfo *di, struct WMTSize *grid, struct WMTSize *obj_tg, struct WMTSize *mesh_tg) {
     UINT overlap = p->dt.out_prim == 1 ? 0 : p->dt.out_prim == 2 ? 1 : 2;
@@ -3238,7 +3298,7 @@ static void mad_ts_draw(const struct mad_pso *p, UINT instances, UINT count, UIN
 }
 /* A direct patch-list draw whose control-point count is the hull shader's. */
 static int mad_dtess_draw_ok(const struct mad_pso *p, D3D12_PRIMITIVE_TOPOLOGY topo, int kind_direct) {
-    return p->gs_emu == 2 && p->rps && kind_direct &&
+    return p->gs_emu == 2 && p->rps && kind_direct &&   /* kind_direct: a direct draw, or an indirect one with prepared arguments */
            topo >= D3D_PRIMITIVE_TOPOLOGY_1_CONTROL_POINT_PATCHLIST && topo <= D3D_PRIMITIVE_TOPOLOGY_32_CONTROL_POINT_PATCHLIST &&
            (UINT)(topo - D3D_PRIMITIVE_TOPOLOGY_1_CONTROL_POINT_PATCHLIST + 1) == p->dt.input_cps;
 }
@@ -4406,6 +4466,7 @@ static void exec_draw(struct mad_exec *e, const struct mad_cmd *c) {
     struct wmtcmd_render_draw c_draw;
     struct wmtcmd_render_draw_indexed c_dix;
     struct wmtcmd_render_draw_meshthreadgroups c_mesh;   /* ml927 */
+    struct wmtcmd_render_draw_meshthreadgroups_indirect c_meshi;   /* madeira-bcd */
     struct wmtcmd_render_dxmt_geometry_draw c_gd; struct wmtcmd_render_dxmt_geometry_draw_indexed c_gdi; UINT64 gs_daboff = 0;   /* ml1147 */
     struct wmtcmd_render_setvisibilitymode c_vis;         /* ml1088 */
     struct mad_gs_drawinfo gdi; int gsemu;
@@ -4431,7 +4492,7 @@ static void exec_draw(struct mad_exec *e, const struct mad_cmd *c) {
         mad_fault_note(e, e->pso);
     }
     gsemu = e->pso->gs_emu;
-    if (gsemu && (c->kind == MC_DRAW_INDIRECT || c->kind == MC_DRAW_INDEXED_INDIRECT)) {
+    if (gsemu && (c->kind == MC_DRAW_INDIRECT || c->kind == MC_DRAW_INDEXED_INDIRECT) && !(gsemu == 2 && e->tind_buf)) {
         static unsigned said; static const void *seen[8];
         if (said < 8) {   /* madeira-bcd: name the pipelines (2700 such skips in a Ghost of Tsushima minute) */
             unsigned q;
@@ -4455,7 +4516,7 @@ static void exec_draw(struct mad_exec *e, const struct mad_cmd *c) {
         g_dump_tables = 1;
     }
     if ((e->pso->has_tess || e->topo >= D3D_PRIMITIVE_TOPOLOGY_1_CONTROL_POINT_PATCHLIST) &&
-        !mad_dtess_draw_ok(e->pso, e->topo, c->kind == MC_DRAW || c->kind == MC_DRAW_INDEXED)) {   /* madeira-bcd: DXIL tessellation draws below */
+        !mad_dtess_draw_ok(e->pso, e->topo, c->kind == MC_DRAW || c->kind == MC_DRAW_INDEXED || e->tind_buf)) {   /* madeira-bcd: DXIL tessellation draws below */
         if (gsemu == 2 && (InterlockedIncrement(&g_dtess_bad_cps) % 64) == 1)
             d3d12_log("[madeira-d3d12] DXIL tessellation draw with topology %u (hull takes %u control points, kind %d) dropped\n",
                       (unsigned)e->topo, e->pso->dt.input_cps, (int)c->kind);
@@ -4663,6 +4724,7 @@ tess_go:
             struct WMTSize grid, otg, mtg;
             struct { UINT64 addr; UINT32 length, stride; } vbt[31];
             if (c->kind == MC_DRAW_INDEXED) { dp[2] = c->u.drawi.start; if (e->ib) ibaddr = e->ib->gpu_address + e->ib_off; }
+            else if (c->kind == MC_DRAW_INDEXED_INDIRECT && e->ib) ibaddr = e->ib->gpu_address + e->ib_off;   /* madeira-bcd */
             if (gsemu == 2) mad_ts_draw(e->pso, inst, count, kind, ibaddr, &gdi, &grid, &otg, &mtg);   /* madeira-bcd */
             else mad_gs_draw(pt, e->pso->gs_vertex_size, e->pso->gs_max_prims, inst, count, kind, ibaddr, &gdi, &grid, &otg, &mtg);
             memset(&c_mesh, 0, sizeof c_mesh); c_mesh.type = WMTRenderCommandDrawMeshThreadgroups;
@@ -4684,8 +4746,10 @@ tess_go:
         } else gdi.index_type = kind;
         memcpy(cpu + MAD_ARG_DRAWPARAMS_OFF, dp, sizeof dp);
         memcpy(cpu + MAD_ARG_DRAWINFO_OFF, &gdi, sizeof gdi);
-        if ((c->kind == MC_DRAW_INDIRECT || c->kind == MC_DRAW_INDEXED_INDIRECT) && c->u.ind.args && c->u.ind.args->buffer)
-            MAD_SETBUF(WMTRenderCommandSetVertexBuffer, c->u.ind.args->buffer, c->u.ind.off, 4);
+        if ((c->kind == MC_DRAW_INDIRECT || c->kind == MC_DRAW_INDEXED_INDIRECT) && c->u.ind.args && c->u.ind.args->buffer) {
+            if (gsemu) MAD_SETBUF_VS(c->u.ind.args->buffer, c->u.ind.off, 4);   /* madeira-bcd: the object stage reads them */
+            else MAD_SETBUF(WMTRenderCommandSetVertexBuffer, c->u.ind.args->buffer, c->u.ind.off, 4);
+        }
         else
             MAD_SETBUF_VS(argbuf, argoff + MAD_ARG_DRAWPARAMS_OFF, 4);
         MAD_SETBUF_VS(argbuf, argoff + MAD_ARG_DRAWINFO_OFF, 5);
@@ -4842,6 +4906,16 @@ tess_go:
         MAD_APPEND(&c_mesh);
         InterlockedIncrement(&g_tess_drawn);
         if (c->kind == MC_DRAW) InterlockedIncrement(&g_tess_nonidx);
+    } else if (gsemu && e->tind_buf && (c->kind == MC_DRAW_INDIRECT || c->kind == MC_DRAW_INDEXED_INDIRECT)) {
+        /* madeira-bcd: indirect DXIL tessellation -- the grid comes from the
+         * dispatch arguments exec_tess_indirect_prep computed on the GPU */
+        if (c->kind == MC_DRAW_INDEXED_INDIRECT && (!e->ib || !e->ib->buffer)) { MAD_SKIP(e); tail->next.ptr = NULL; return; }
+        memset(&c_meshi, 0, sizeof c_meshi); c_meshi.type = WMTRenderCommandDrawMeshThreadgroupsIndirect;
+        c_meshi.indirect_args_buffer = e->tind_buf; c_meshi.indirect_args_offset = e->tind_off;
+        c_meshi.object_threadgroup_size = c_mesh.object_threadgroup_size; c_meshi.mesh_threadgroup_size = c_mesh.mesh_threadgroup_size;
+        c_meshi.reserved[0] = (uint16_t)MAD_DTESS_OBJECT_TG_MEM; c_meshi.reserved[1] = 0x7e55;
+        MAD_APPEND(&c_meshi);
+        InterlockedIncrement(&g_dtess_ind_drawn);
     } else if (gsemu) {   /* ml927 */
         if (c->kind == MC_DRAW_INDEXED && (!e->ib || !e->ib->buffer)) { MAD_SKIP(e); tail->next.ptr = NULL; return; }
         MAD_APPEND(&c_mesh);
@@ -5114,6 +5188,45 @@ static void exec_copy(struct mad_exec *e, const struct mad_cmd *c) {
     }
 }
 
+/* madeira-bcd: before an indirect DXIL tessellation draw, one small compute
+ * pass turns its argument records (written by the GPU) into mesh dispatch
+ * arguments: ceil(count / (patches per object threadgroup x control points))
+ * object threadgroups by the instance count. The render pass is split there,
+ * as it is for any dispatch between draws. Returns 0 (the draws are skipped as
+ * before) when the helper kernel is not available. */
+static int exec_tess_indirect_prep(struct mad_exec *e, const struct mad_cmd *c, UINT64 *out_off) {
+    struct mad_device *d = e->q->device;
+    struct wmtcmd_compute_setpso sp; struct wmtcmd_compute_setbuffer sb[2]; struct wmtcmd_compute_setbytes sby; struct wmtcmd_compute_dispatch dsp;
+    struct { UINT32 count, rec_words, verts_per_tg, pad; } prm;
+    UINT64 off;
+    static unsigned said;
+    if (!e->pso->rps || !c->u.ind.count || (c->u.ind.stride & 3) || (c->u.ind.off & 3) || !mad_kernels_ready(d)) return 0;
+    off = mad_kring_alloc(d, (UINT64)c->u.ind.count * 16);
+    if (off == ~(UINT64)0) return 0;
+    if (e->renc) InterlockedIncrement(&g_pass_end_dispatch);
+    exec_end(e);
+    e->cenc = MTLCommandBuffer_computeCommandEncoder(e->cb, false);
+    if (!e->cenc) return 0;
+    g_enc_seq++; e->cenc_pso = NULL; e->cenc_seq = g_enc_seq;
+    exec_fence_compute(e, e->cenc, 0);
+    e->wr_all = 1;
+    prm.count = c->u.ind.count; prm.rec_words = (UINT32)(c->u.ind.stride / 4);
+    prm.verts_per_tg = e->pso->dt.patches_per_tg * e->pso->dt.input_cps; prm.pad = 0;
+    memset(&sp, 0, sizeof sp); memset(sb, 0, sizeof sb); memset(&sby, 0, sizeof sby); memset(&dsp, 0, sizeof dsp);
+    sp.type = WMTComputeCommandSetPSO; sp.pso = d->k_tind_pso;
+    sp.threadgroup_size.width = 64; sp.threadgroup_size.height = 1; sp.threadgroup_size.depth = 1;
+    sb[0].type = WMTComputeCommandSetBuffer; sb[0].buffer = c->u.ind.args->buffer; sb[0].offset = c->u.ind.off; sb[0].index = 0;
+    sb[1].type = WMTComputeCommandSetBuffer; sb[1].buffer = d->k_ring; sb[1].offset = off; sb[1].index = 1;
+    sby.type = WMTComputeCommandSetBytes; sby.bytes.ptr = &prm; sby.length = sizeof prm; sby.index = 2;
+    dsp.type = WMTComputeCommandDispatch; dsp.size.width = (c->u.ind.count + 63) / 64; dsp.size.height = 1; dsp.size.depth = 1;
+    sp.next.ptr = &sb[0]; sb[0].next.ptr = &sb[1]; sb[1].next.ptr = &sby; sby.next.ptr = &dsp;
+    MTLComputeCommandEncoder_encodeCommands(e->cenc, (const struct wmtcmd_base *)&sp);
+    if (said++ < 4)
+        d3d12_log("[madeira-d3d12] indirect tessellation: %u record(s) of %u bytes for vs '%s' -> mesh dispatch arguments (%u vertices per object threadgroup)\n",
+                  c->u.ind.count, c->u.ind.stride, e->pso->vs_name, prm.verts_per_tg);
+    *out_off = off;
+    return 1;
+}
 static void exec_dispatch(struct mad_exec *e, const struct mad_cmd *c) {
     struct wmtcmd_compute_setpso c_pso;
     e->wr_all = 1;   /* ml1116: a dispatch writes through UAVs we do not enumerate here */
@@ -5372,12 +5485,17 @@ static void mad_exec_list(struct mad_queue *q, struct mad_list *l, obj_handle_t 
         case MC_QUERY_RESOLVE: exec_query_resolve(&e, c); break;
         case MC_DRAW: case MC_DRAW_INDEXED: exec_draw(&e, c); break;
         case MC_DRAW_INDIRECT: case MC_DRAW_INDEXED_INDIRECT: case MC_DISPATCH_INDIRECT: {
-            struct mad_cmd t = *c; UINT k;
+            struct mad_cmd t = *c; UINT k; UINT64 toff = 0;
+            int tess = 0;
             if (!c->u.ind.args || !c->u.ind.args->buffer) { e.skipped++; break; }
+            if (c->kind != MC_DISPATCH_INDIRECT && e.pso && e.pso->gs_emu == 2)   /* madeira-bcd */
+                tess = exec_tess_indirect_prep(&e, c, &toff);
             for (k = 0; k < c->u.ind.count; k++) {
                 t.u.ind.off = c->u.ind.off + (UINT64)k * c->u.ind.stride;
+                if (tess) { e.tind_buf = e.q->device->k_ring; e.tind_off = toff + (UINT64)k * 16; }
                 if (c->kind == MC_DISPATCH_INDIRECT) exec_dispatch(&e, &t); else exec_draw(&e, &t);
             }
+            e.tind_buf = 0; e.tind_off = 0;
             break;
         }
         case MC_COPY_BB: case MC_COPY_B2T: case MC_COPY_T2B: case MC_COPY_T2T: case MC_FILL_BB: case MC_FILL_TEX: exec_copy(&e, c); break;
@@ -6431,6 +6549,9 @@ static ULONG STDMETHODCALLTYPE device_Release(ID3D12Device *This) {
             for (k = 0; k < d->ntheaps; k++) { if (d->theaps[k].heap) NSObject_release(d->theaps[k].heap); free(d->theaps[k].fl); }
             mad_mheap_reclaim(d, 1); free(d->mhret);   /* ml1148 */
             for (k = 0; k < d->nfillpat; k++) if (d->fillpat[k].buf) NSObject_release(d->fillpat[k].buf);   /* ml1151 */
+            if (d->k_ring) NSObject_release(d->k_ring);          /* madeira-bcd: helper kernels */
+            if (d->k_tind_pso) NSObject_release(d->k_tind_pso);
+            if (d->k_lib) NSObject_release(d->k_lib);
             free(d->theaps); free(d->hret);
             DeleteCriticalSection(&d->heap_lock);
         }
