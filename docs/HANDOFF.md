@@ -623,6 +623,24 @@ tracked DLL and stay green).
   build and never lost the old ones; entries of earlier builds are removed
   once per build (log: `DXBC shader cache: removed N entries`).
 
+### Build 210: the 209 test (log 2026-09-28 10:13, video)
+* The C++ fix is applied (`[pc2fh] ... now maps`); the owner saved five
+  times without a crash. The RGBA32 clear is exact now (`UAV clear value
+  0xbf800000 0x4cbebc20 0 0: exact pattern buffer`), the big smears are gone
+  and the GPU time dropped from 52-56 ms to 18-19 ms a frame at 1564x720
+  (15 -> 20-22 FPS): the uncleared buffer was also costing GPU time.
+* Left: dark specks and blocky haze near the bridge. Two leads:
+  - 4 `ClearUnorderedAccessViewUint on a texture view the runtime does not
+    know; skipped`. Now the named resource is cleared (the recorded view's
+    sub-range, or all of a single-mip texture in its own format), and the log
+    says why the view was unknown.
+  - `indirect draw on a geometry-shader pipeline is not implemented` is the
+    only skip site: 2,696 draws a run (`skips by site: L4436`). The only such
+    pipelines are the DXIL tessellation ones (water, `ls_SetColor`). The log
+    line now names each pipeline; implementing indirect tessellation draws
+    (the object threadgroup count comes from the GPU-side arguments) is next
+    if they matter.
+
 ### Build 209: the 208 test (log 2026-09-28 09:31, video, 1564x720 "Fill")
 * **Smears with a still camera** (video, first 10 s: directional streaks and
   blocky patches behind the cart, the "dark patches in the air"). The log had

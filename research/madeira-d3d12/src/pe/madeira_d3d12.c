@@ -4432,7 +4432,17 @@ static void exec_draw(struct mad_exec *e, const struct mad_cmd *c) {
     }
     gsemu = e->pso->gs_emu;
     if (gsemu && (c->kind == MC_DRAW_INDIRECT || c->kind == MC_DRAW_INDEXED_INDIRECT)) {
-        static unsigned said; if (said++ < 4) d3d12_log("[madeira-d3d12] indirect draw on a geometry-shader pipeline is not implemented; skipped\n");
+        static unsigned said; static const void *seen[8];
+        if (said < 8) {   /* madeira-bcd: name the pipelines (2700 such skips in a Ghost of Tsushima minute) */
+            unsigned q;
+            for (q = 0; q < said && seen[q] != e->pso; q++) ;
+            if (q == said) {
+                seen[said++] = e->pso;
+                d3d12_log("[madeira-d3d12] indirect draw on a geometry-shader pipeline is not implemented; skipped "
+                          "(pipeline %p: kind %d, vs '%s' ps '%s', %s)\n", (void *)e->pso, gsemu, e->pso->vs_name, e->pso->ps_name,
+                          c->kind == MC_DRAW_INDEXED_INDIRECT ? "indexed" : "non-indexed");
+            }
+        }
         MAD_SKIP(e); return;
     }
     if (g_census_on) { exec_capture_draw(e, c); exec_desc_check(e, e->rs, e->root, e->pso->vs_name); }   /* ml910/ml913 */
@@ -11417,9 +11427,32 @@ static void mad_record_uav_tex_clear(struct mad_list *l, UINT64 view_id, struct 
     static unsigned said_miss, said_fmt, said_ok;
     struct mad_uavtex u; unsigned char px[16]; UINT bpp, rbytes = 0, rblock = 0; UINT32 pat, w[4], per[4];
     obj_handle_t pattern; struct mad_cmd *c;
-    if (!mad_uavtex_get(view_id, &u) || !u.res || (res && u.res != res) || !u.res->texture) {
-        if (said_miss++ < 4) d3d12_log("[madeira-d3d12] %s on a texture view the runtime does not know; skipped\n", what);
-        return;
+    {
+        /* madeira-bcd: a view we did not record, or one recorded for another
+         * resource (its id reused after a free, or an alias), used to be
+         * skipped -- a buffer the game clears every frame then kept stale data
+         * (Ghost of Tsushima: 4 such clears, blocky haze and dark specks near
+         * the bridge). The application names the resource: clear that, with
+         * the recorded view's sub-range when there is one, else the whole of a
+         * single-mip texture in its own format. */
+        int known = mad_uavtex_get(view_id, &u) && u.res && u.res->texture;
+        struct mad_resource *app = res && res->texture ? res : NULL;
+        const char *why = NULL;
+        if (known && (!res || u.res == res)) ;                    /* the normal case */
+        else if (known && app) { why = "recorded for another resource"; u.res = app; }
+        else if (app && app->tex_mips <= 1) {
+            why = known ? "recorded for a non-texture" : "not recorded";
+            memset(&u, 0, sizeof u); u.id = view_id; u.res = app; u.level = 0; u.sl0 = 0; u.nsl = ~0u; u.fmt = app->desc.Format;
+        } else {
+            if (said_miss++ < 8)
+                d3d12_log("[madeira-d3d12] %s on a texture view the runtime does not know (%s, resource '%s' %ux%u mips %u); skipped\n",
+                          what, known ? "recorded for another resource" : "not recorded",
+                          res && res->name ? res->name : "?", res ? res->width : 0, res ? res->height : 0, res ? res->tex_mips : 0);
+            return;
+        }
+        if (why && said_miss++ < 8)
+            d3d12_log("[madeira-d3d12] %s: view %s; clearing the named resource '%s' %ux%u (mip %u, format %u)\n",
+                      what, why, u.res->name ? u.res->name : "?", u.res->width, u.res->height, u.level, (unsigned)u.fmt);
     }
     bpp = u.res->samples > 1 ? 0 : mad_pack_clear(u.fmt, v, is_float, px);
     if (bpp) mad_format_info(u.res->desc.Format, &rbytes, &rblock);
