@@ -33,7 +33,7 @@ final class GameSession: ObservableObject {
     private static let performanceKey = "madeira.session.performanceOverlay"
 }
 
-/// How the 1024x768 surface sits on the screen. MetalBackedView.gameRect()
+/// How the guest display sits on the screen. MetalBackedView.gameRect()
 /// reads this, and touch mapping uses the same rect, so input follows.
 enum DisplayFit: String, CaseIterable, Identifiable {
     case fit
@@ -43,7 +43,7 @@ enum DisplayFit: String, CaseIterable, Identifiable {
 
     var label: String {
         switch self {
-        case .fit: return "Fit (4:3)"
+        case .fit: return "Fit"
         case .stretch: return "Stretch"
         }
     }

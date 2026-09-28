@@ -112,6 +112,12 @@ final class MetalBackedView: UIView {
         self.isMultipleTouchEnabled = true
         self.isUserInteractionEnabled = true
         self.backgroundColor = .clear
+        // A mode change reshapes the game rect (e.g. 4:3 -> 16:9).
+        NotificationCenter.default.addObserver(forName: NSNotification.Name(MadeiraDisplayModeChangedNotification),
+                                               object: nil, queue: .main) { [weak self] _ in
+            self?.setNeedsLayout()
+            self?.layoutIfNeeded()
+        }
     }
     required init?(coder: NSCoder) {
         super.init(coder: coder)
@@ -128,16 +134,25 @@ final class MetalBackedView: UIView {
     // ~1 FPS content mostly doesn't. Resolution path: raise game FPS (perf
     // work), with a steady-rate re-present in DXMT as fallback insurance.
 
-    /// Largest 4:3 rect (the 1024×768 logical surface's aspect) that fits
-    /// centered in our bounds. The window-level host view gets THIS frame,
-    /// not our full bounds — otherwise landscape stretches the game to the
-    /// display edges (2026-07-05). Touch mapping uses the same rect so
-    /// letterboxing never skews input.
+    /// The guest's CURRENT display mode in pixels (1024x768 by default; a
+    /// per-game screen size or the game's own ChangeDisplaySettings moves it).
+    static func guestSize() -> CGSize {
+        var w: Int32 = 0, h: Int32 = 0
+        winios_screen_size(&w, &h)
+        return CGSize(width: Int(w > 0 ? w : 1024), height: Int(h > 0 ? h : 768))
+    }
+
+    /// Largest rect of the guest display's aspect that fits centered in our
+    /// bounds. The window-level host view gets THIS frame, not our full
+    /// bounds — otherwise landscape stretches the game to the display edges
+    /// (2026-07-05). Touch mapping uses the same rect so letterboxing never
+    /// skews input. It used to be a fixed 4:3, which squeezed a 16:9 mode.
     private func gameRect() -> CGRect {
         // Session panel "Display fit": Stretch hands the whole placeholder to
         // the surface; touch mapping reads this same rect, so input follows.
         if DisplayFit.current == .stretch { return bounds }
-        let gw: CGFloat = 1024, gh: CGFloat = 768
+        let g = Self.guestSize()
+        let gw = g.width, gh = g.height
         let scale = min(bounds.width / gw, bounds.height / gh)
         let w = gw * scale, h = gh * scale
         return CGRect(x: (bounds.width - w) / 2, y: (bounds.height - h) / 2,
@@ -207,14 +222,15 @@ final class MetalBackedView: UIView {
         winios_cursor_relayout()
     }
 
-    // Map touch point in view-local UI points to the 1024×768 logical
-    // surface DXMT swapchains use, then post to winios.drv. Coordinates
-    // are relative to the aspect-fit gameRect (letterbox borders clamp).
+    // Map touch point in view-local UI points to the guest display's pixels,
+    // then post to winios.drv. Coordinates are relative to the aspect-fit
+    // gameRect (letterbox borders clamp).
     private func mapTouch(_ touch: UITouch) -> (Int32, Int32) {
         let p = touch.location(in: self)
         let r = gameRect()
-        let x = Int32(min(max((p.x - r.minX) * 1024 / r.width, 0), 1023))
-        let y = Int32(min(max((p.y - r.minY) * 768 / r.height, 0), 767))
+        let g = Self.guestSize()
+        let x = Int32(min(max((p.x - r.minX) * g.width / r.width, 0), g.width - 1))
+        let y = Int32(min(max((p.y - r.minY) * g.height / r.height, 0), g.height - 1))
         return (x, y)
     }
 

@@ -461,6 +461,14 @@ already did.
   trackpad handling as the Windows desktop, clamped to the game's live display
   mode and starting from the drawn cursor. Stored in
   `Documents/madeira-input.json` (`directTouch`).
+- Screen size (per-game settings, direct launch only): the virtual monitor's
+  default size, `MADEIRA_SCREEN_W/H` with `MADEIRA_SCREEN_SRC=game`. win32u
+  advertises only modes up to that many pixels (ml1140), so the 1024x768
+  default hid 1280x720; pick 1280x720 to offer 720p. A direct launch without
+  one now unsets the variables instead of inheriting a previous desktop
+  session's size. The game rect and touch mapping follow the guest's live
+  mode (`winios_screen_size`, re-laid-out on `MadeiraDisplayModeChanged`)
+  instead of a fixed 4:3 1024x768, so a 16:9 mode is no longer squeezed.
 - `GameControllerManager.swift`: physical controllers mapped to keyboard and
   mouse (ported from SaimSuhailQu/Madeira 72ca339). Since upstream #22 hands
   pads to games as real XInput controllers (`GamepadInput.swift`), this

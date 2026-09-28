@@ -50,6 +50,9 @@ struct LaunchRequest {
     /// (MADEIRA_FASTSYNC=0), for games whose worker threads free memory another
     /// thread is still using -- the signature of a wait that returned early.
     var safeSync = false
+    /// Direct launch only: the virtual monitor's default size (its mode list
+    /// stops at this many pixels). nil = 1024x768.
+    var screen: (w: Int, h: Int)?
     private static var forcedFastsyncOff = false
 
     func apply() {
@@ -62,6 +65,16 @@ struct LaunchRequest {
             setenv("MADEIRA_SCREEN_H", String(d.h), 1)
         } else {
             unsetenv("MADEIRA_DESKTOP")
+            // Never inherit a previous desktop session's size.
+            if let s = screen {
+                setenv("MADEIRA_SCREEN_W", String(s.w), 1)
+                setenv("MADEIRA_SCREEN_H", String(s.h), 1)
+                setenv("MADEIRA_SCREEN_SRC", "game", 1)
+            } else {
+                unsetenv("MADEIRA_SCREEN_W")
+                unsetenv("MADEIRA_SCREEN_H")
+                unsetenv("MADEIRA_SCREEN_SRC")
+            }
         }
         if avx { setenv("MADEIRA_FEX_AVX", "1", 1) } else { unsetenv("MADEIRA_FEX_AVX") }
         if wineVCRT { setenv("MADEIRA_WINE_VCRT", "1", 1) } else { unsetenv("MADEIRA_WINE_VCRT") }
@@ -219,6 +232,9 @@ enum LibraryPrefs {
     private static let vcrtKey = "madeira.library.wineVCRT"
     private static let nvidiaKey = "madeira.library.nvidia"
     private static let safeSyncKey = "madeira.library.safeSync"
+    private static let screenKey = "madeira.library.screen"
+    /// Per-game virtual monitor sizes; "" = default (1024x768).
+    static let screenSizes = ["", "1280x720", "1600x900", "1920x1080"]
 
     private static func dict<T>(_ key: String) -> [String: T] {
         (UserDefaults.standard.dictionary(forKey: key) as? [String: T]) ?? [:]
@@ -253,6 +269,9 @@ enum LibraryPrefs {
 
     static func safeSync(_ windowsPath: String) -> Bool { (dict(safeSyncKey) as [String: Bool])[windowsPath] ?? false }
     static func setSafeSync(_ on: Bool, for windowsPath: String) { store(on ? true : nil, safeSyncKey, windowsPath) }
+
+    static func screen(_ windowsPath: String) -> String { (dict(screenKey) as [String: String])[windowsPath] ?? "" }
+    static func setScreen(_ size: String, for windowsPath: String) { store(size.isEmpty ? nil : size, screenKey, windowsPath) }
 }
 
 /// Reads the PE header's Machine field. Two small reads per file, off the main
@@ -685,6 +704,11 @@ struct HomeView: View {
         request.wineVCRT = LibraryPrefs.wineVCRT(exe.windowsPath)
         request.nvidia = LibraryPrefs.nvidia(exe.windowsPath)
         request.safeSync = LibraryPrefs.safeSync(exe.windowsPath)
+        let screen = LibraryPrefs.screen(exe.windowsPath)
+        if !screen.isEmpty {
+            let s = ContentView.desktopSize(screen)
+            request.screen = (w: s.0, h: s.1)
+        }
         LibraryPrefs.markPlayed(game.title)
         start(request)
     }
@@ -871,6 +895,7 @@ struct GameSettingsSheet: View {
     @State private var wineVCRT: Bool
     @State private var nvidia: Bool
     @State private var safeSync: Bool
+    @State private var screen: String
     @State private var photo: PhotosPickerItem?
     @State private var tick = 0
 
@@ -887,6 +912,7 @@ struct GameSettingsSheet: View {
         _wineVCRT = State(initialValue: LibraryPrefs.wineVCRT(exe.windowsPath))
         _nvidia = State(initialValue: LibraryPrefs.nvidia(exe.windowsPath))
         _safeSync = State(initialValue: LibraryPrefs.safeSync(exe.windowsPath))
+        _screen = State(initialValue: LibraryPrefs.screen(exe.windowsPath))
     }
 
     /// What the exe will get: the typed arguments, else the suggestion.
@@ -982,6 +1008,12 @@ struct GameSettingsSheet: View {
                     Toggle("Wine's C++ runtime", isOn: $wineVCRT)
                     Toggle("Report an NVIDIA GPU", isOn: $nvidia)
                     Toggle("Safe thread sync (no fastsync)", isOn: $safeSync)
+                    Picker("Screen size", selection: $screen) {
+                        ForEach(LibraryPrefs.screenSizes, id: \.self) { size in
+                            Text(size.isEmpty ? "Default (1024x768)" : size).tag(size)
+                        }
+                    }
+                    .disabled(inDesktop)
                 } header: {
                     Text("Launch options")
                 } footer: {
@@ -993,7 +1025,9 @@ struct GameSettingsSheet: View {
                          + "NVAPI, for games that stop with \"no graphics card\" or \"failed to get GPU driver "
                          + "info\" (Ghost of Tsushima). Safe thread sync turns off Madeira's fast path for "
                          + "Windows events and waits: slower, for a game whose threads crash on memory another "
-                         + "thread just freed.")
+                         + "thread just freed. Screen size is the virtual monitor a game starts on; its "
+                         + "resolution list stops at that many pixels, so pick 1280x720 to offer 720p. Larger "
+                         + "costs frame rate. (Inside the Wine desktop the desktop size decides.)")
                 }
 
                 Section {
@@ -1044,6 +1078,7 @@ struct GameSettingsSheet: View {
                 wineVCRT = LibraryPrefs.wineVCRT(newPath)
                 nvidia = LibraryPrefs.nvidia(newPath)
                 safeSync = LibraryPrefs.safeSync(newPath)
+                screen = LibraryPrefs.screen(newPath)
             }
             .onChange(of: photo) { _, item in
                 guard let item else { return }
@@ -1069,6 +1104,7 @@ struct GameSettingsSheet: View {
         LibraryPrefs.setWineVCRT(wineVCRT, for: exePath)
         LibraryPrefs.setNvidia(nvidia, for: exePath)
         LibraryPrefs.setSafeSync(safeSync, for: exePath)
+        LibraryPrefs.setScreen(screen, for: exePath)
     }
 }
 
