@@ -623,6 +623,24 @@ tracked DLL and stay green).
   build and never lost the old ones; entries of earlier builds are removed
   once per build (log: `DXBC shader cache: removed N entries`).
 
+### Build 213: particle tessellation cap; the loading-screen freeze
+* `[probe]` (log 2026-09-28 14:04) settles the FPS drop: the particle draws
+  (`ls_SetColor`, `vs_SetColor`, `vs_SetColorCombinedAlpha`, 4 vertices x N
+  instances) go 16 -> 2,929 -> 5,052 -> 6,897 -> 7,692 instances within
+  seconds and then vary with the fires: not a leak, the game's particles.
+  Each is a tessellated quad (max factor 9, up to 162 triangles) drawn three
+  times through the emulation, and in the 13:21 log the GPU time climbed
+  17 -> 44 ms as they spawned. Other indirect pipelines are steady. Build 213
+  clamps the hull's max factor to 3 for pipelines declaring <= 16 (the water
+  declares 64 and keeps it): madeira.cfg `dxil-tess-max-factor`, 0 = off.
+* Loading-screen freeze (log 14:03): `RtlpWaitForCriticalSection ... blocked
+  by 00bc`; 00bc was calling GetThreadContext on another thread thousands of
+  times and getting `rip=0 rsp=0 flags=00100002` (no CONTEXT_CONTROL: the
+  server had no native capture). The unix NtGetContextThread now fills the
+  control (and integer) registers from the target's saved x64 state
+  (ChpeV2CpuAreaInfo->ContextAmd64) when the server returns none; log
+  `[ctx] madeira-bcd get ... returning the target's saved x64 state`.
+
 ### Build 212: probes for the GPU time that grows (log 2026-09-28 13:21)
 * Build 211 draws the indirect tessellation (`DXIL tessellation: 3117 drawn
   (3117 indirect)`; every tessellation draw in gameplay is indirect). The
