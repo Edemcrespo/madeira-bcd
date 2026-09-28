@@ -59,6 +59,26 @@ Upstream PRs merged into the fork (not yet merged upstream):
   full logs via the Actions UI / API job logs.
 * Commit messages: say what was wrong, the evidence, and the fix (see
   `git log`). Keep `docs/madeira-bcd.md` updated for every change.
+* **Update packs (since build 215) -- prefer them to a new IPA.** A change
+  confined to the D3D12 runtime's PE source (`research/madeira-d3d12/src/pe`)
+  does NOT need an IPA: pushing it to the dev branch runs
+  `.github/workflows/build-pack.yml` (a few minutes), which publishes
+  `madeira-pack-<N>.zip` + `index.json` on the public prerelease **`packs`**.
+  The owner taps Settings > Updates (or the home banner) and the next game
+  start uses it. Tell the owner "pack N", not an IPA link, for such fixes.
+  A pack installs only over an app whose `MadeiraNativeABI` (Info.plist)
+  equals the pack's `native_abi` (`tools/native-abi.sh`: app/, build/, DXMT,
+  the conversion service, patch scripts, wine/FEX commits). Anything native
+  (Swift/ObjC, ntdll-unix, winemetal unix, madeira_cfg.h, DXMT patches) still
+  needs the IPA build -- and after it, packs are built against the new ABI.
+  If a workflow change alters the native build, bump `EPOCH` in
+  `tools/native-abi.sh`. The `packs` release holds only DLLs built from this
+  repository (never an IPA, Apple's converter or Microsoft's runtime).
+* **Per-game config:** Settings sheet of a game > "Advanced: this game's
+  config" edits `Application Support/GameConfigs/<hash>.cfg` (madeira.cfg
+  syntax). Exported as `MADEIRA_CFG_GAME`; `madeira_cfg_get` lets its keys win
+  over madeira.cfg and its `env.*` lines are exported last. Use it to ask the
+  owner to A/B a switch for one game without any build.
 * A 12-hour "upstream sync" routine existed on the Claude side (merge
   `willfaust/Madeira` main into the dev branch, keep 125hz's submodule
   commits). It will not run elsewhere; do it by hand if needed:
@@ -622,6 +642,25 @@ tracked DLL and stay green).
 * The unix DXBC cache (`Documents/shadercache/*.mdsc`) got a fresh set per
   build and never lost the old ones; entries of earlier builds are removed
   once per build (log: `DXBC shader cache: removed N entries`).
+
+### Build 215: update packs, per-game config, MetalFX, thermal (2026-09-28)
+The owner is tired of signing and installing an IPA per experiment, so the
+iteration loop moved in-app (see section 2, "Update packs"). Also:
+* `metalfx-upscale = <factor>` (per game from the sheet: Off / 1.5x / 2x):
+  the D3D12 swapchain runs Apple's MetalFX spatial scaler on a 2D view of the
+  back buffer into a private texture of factor x size, and the present blit
+  copies that into a drawable of the same size (`mad_swap_make_fx`,
+  `mad_present_run`). D3D11 games get DXMT's own MetalFX swapchain
+  (`DXMT_METALFX_SPATIAL_SWAPCHAIN=1`, `d3d11.metalSpatialUpscaleFactor`).
+  Meant with a small screen size (960x540, 1280x720) for frame rate.
+* Per-game starting FPS limit (`fps-limit` = 30/40/60/max/raw) and the
+  tessellation cap (`dxil-tess-max-factor`) as pickers.
+* The FPS overlay shows the thermal state (OK/WARM/HOT/CRIT); `[thermal]`
+  lines mark transitions and every `[present]` line carries it. Use it on the
+  "starts 40-45, sinks to 20" report: a HOT at the drop means clocks, not us.
+* Note: the D3D12 runtime presents through winemetal's
+  `MTLCommandBuffer_presentDrawable`, so the Session panel's 30/40/60 caps
+  already apply to Ghost of Tsushima.
 
 ### Build 214: upstream sync (2026-09-28)
 Merged willfaust/madeira 9e9dfb6, e39be62, 735e323. Upstream vendors the

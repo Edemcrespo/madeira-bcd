@@ -47,6 +47,57 @@ step says so when it becomes a no-op:
   `ENABLE_FEX_ALLOCATOR=OFF`) gets a weak fallback; `IOS_RPM_GUARD` gets a
   no-op definition in the system-allocator branch.
 
+## Update packs (`.github/workflows/build-pack.yml`, `app/Madeira/UpdatePacks.swift`)
+
+Why: on iOS the Windows-side DLLs are data. Wine maps the PE file a system32
+farm link resolves to (`loader_ios.c`, `load_builtin` returns
+`STATUS_IMAGE_ALREADY_LOADED`), copies it into the JIT pool, and binds its unix
+side by DLL name (`virtual_ios.c`, `load_builtin_unixlib`) -- nothing about a
+PE needs signing or has to live in the bundle. So a fix in the D3D12 runtime
+can reach the phone without a new IPA.
+
+- **Pack.** A zip with `madeira-pack.json` at its root (format 1: build, commit,
+  created, `native_abi`, notes, files with SHA-256) and the DLLs under
+  `arm64ec-windows/` (also accepted: `aarch64-windows/`, `i386-windows/`).
+  Today it carries `madeira_d3d12.dll` and the same file as `d3d12.dll`.
+- **Build.** `build-pack.yml` runs on every push to the dev branch that touches
+  `research/madeira-d3d12/src/pe` (or by hand): DXMT submodule only, the four
+  DXMT source patches, llvm-mingw, `tools/build-madeira-d3d12-dll.sh`. The
+  artifact is the pack itself. `tools/pack-index.py` publishes it on the rolling
+  public prerelease `packs` with `index.json` (newest 25 packs; plus the last
+  IPA builds' ABI, recorded by `build-ipa.yml`, metadata only).
+- **Compatibility.** `tools/native-abi.sh` hashes `git ls-files -s` over the
+  native half (app/ minus the pack-replaceable PE files, build/, DXMT, the
+  D3D12 conversion service and ABI header, the patch scripts, the wine and FEX
+  commits) plus an `EPOCH`. The IPA stamps it into Info.plist
+  (`MadeiraNativeABI`, with `MadeiraShaderCacheID`, `MadeiraCommit`,
+  `MadeiraBuilt`, `MadeiraRepo`); a pack with another value is refused, and so
+  is a pack created before the app was built (it would override newer DLLs).
+- **App.** Settings > Updates checks `index.json`, installs the newest
+  compatible pack (or any older compatible one), or a zip from Files; the home
+  screen shows a banner when one is waiting and a "Pack N" chip when one is
+  active. The zip reader is the app's own (stored/deflate via Compression,
+  zip64 aware). Install verifies every SHA-256 into a staging directory and
+  swaps it in; every launch verifies again before exporting
+  `MADEIRA_PACK_DIR`/`MADEIRA_PACK_ID`. `WineProcessBridge.m`
+  (`madeira_pe_source`) then links those farm entries to the pack's files and
+  logs `[pack] arm64ec-windows/<dll> from the update pack (...)`.
+- **Shader cache.** The cache identity is the converter's, i.e. the app's: the
+  app exports `MADEIRA_SC_ID` from Info.plist and `madeira_d3d12` uses it in
+  place of its compiled-in value (same bytes as before, so existing caches
+  stay). The runtime's `device created:` line names its build (`ipa N` or
+  `pack N (sha)`).
+
+## Per-game config (`app/Madeira/GameProfiles.swift`)
+
+A game's own `madeira.cfg`, in `Application Support/GameConfigs/<fnv>.cfg`,
+exported as `MADEIRA_CFG_GAME` when it sets anything. `build/madeira_cfg.h`
+reads it after madeira.cfg (and the legacy files), so its keys win;
+`WineProcessBridge.m` exports its `env.*` lines after madeira.cfg's; a `dxmt`
+line there is appended to DXMT_CONFIG. The game sheet has pickers for
+`metalfx-upscale`, `fps-limit` (applied when the session starts) and
+`dxil-tess-max-factor`, and an editor for the raw file.
+
 ## WoW64 and D3D9 (125hz, upstream PR #28, not yet merged upstream)
 
 Merged from `willfaust/Madeira` pull request #28 (125hz): 32-bit programs run
@@ -520,3 +571,19 @@ already did.
   phys_footprint by 0 MB against +256 MB anonymous.
 - Bundle identifier `com.willfaust.mythicemu`, so an installed copy keeps its
   container (Wine prefix, library, covers) across updates.
+- Update packs and per-game config: see their sections above. Game sheet >
+  Graphics & performance: MetalFX upscaling (Off / 1.5x / 2x), FPS limit at
+  start, tessellation detail, and the game's raw config.
+- MetalFX upscaling (`metalfx-upscale`): the D3D12 swapchain
+  (`mad_swap_make_fx`) creates a 2D view of each back buffer (they are 2D
+  arrays), a private output texture of factor x size and an
+  `MTLFXSpatialScaler`; Present encodes the scale, then blits the output into a
+  drawable of that size (the layer's drawable size follows). Under fence-chain
+  6 the scaler waits on and updates the device fence, so the blit's wait orders
+  after it. Any setup failure logs and keeps the plain copy. D3D11 games use
+  DXMT's own MetalFX swapchain (`DXMT_METALFX_SPATIAL_SWAPCHAIN=1`,
+  `d3d11.metalSpatialUpscaleFactor`).
+- Performance overlay: a thermal-state pill (OK / WARM / HOT / CRIT from
+  `ProcessInfo.thermalState`); transitions are logged as `[thermal]` with the
+  FPS at that moment, and every `[present]` line carries the state and low
+  power mode.
