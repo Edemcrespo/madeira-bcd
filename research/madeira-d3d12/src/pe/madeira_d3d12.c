@@ -488,6 +488,69 @@ static void mad_xp_role(char role) {   /* tell the probe which thread this is (u
     memset(&a, 0, sizeof a); a.op = 4; a.len = (UINT64)(unsigned char)role; a.ptr = me; MadeiraCtl(&a);
 }
 static LONG64 mad_qpc(void) { LARGE_INTEGER t; QueryPerformanceCounter(&t); return t.QuadPart; }
+
+/* madeira-bcd: WHERE ExecuteCommandLists SPENDS ITS TIME. Ghost of Tsushima's
+ * render thread spends 10-16 ms of a 40 ms frame inside our replay (14:04 log,
+ * ~630 draws and ~200 dispatches a frame), and nothing said which part. The
+ * [perf] "encode split" line divides it: the unix calls that hand each draw's
+ * command chain to Metal, encoder open/close, the rest (the replay itself:
+ * tables, bindings). Timed with the generic timer read in place (one mrs, no
+ * call), so the measurement does not cost what it measures. */
+static volatile LONG64 g_es_enc_t, g_es_open_t;
+static volatile LONG g_es_enc_n, g_es_open_n, g_es_use_n;
+static UINT64 g_es_freq;
+static inline UINT64 mad_tick(void) {
+#if defined(__aarch64__) || defined(__arm64ec__)
+    UINT64 v; __asm__ __volatile__("mrs %0, cntvct_el0" : "=r"(v)); return v;
+#else
+    return (UINT64)mad_qpc();
+#endif
+}
+static UINT64 mad_tick_freq(void) {
+    if (!g_es_freq) {
+#if defined(__aarch64__) || defined(__arm64ec__)
+        UINT64 f; __asm__ __volatile__("mrs %0, cntfrq_el0" : "=r"(f)); g_es_freq = f ? f : 24000000;
+#else
+        LARGE_INTEGER f; QueryPerformanceFrequency(&f); g_es_freq = (UINT64)f.QuadPart;
+#endif
+    }
+    return g_es_freq;
+}
+static void mad_es_rce(obj_handle_t e, const struct wmtcmd_base *c) {
+    UINT64 t = mad_tick(); (MTLRenderCommandEncoder_encodeCommands)(e, c);
+    InterlockedExchangeAdd64(&g_es_enc_t, (LONG64)(mad_tick() - t)); InterlockedIncrement(&g_es_enc_n);
+}
+static void mad_es_cce(obj_handle_t e, const struct wmtcmd_base *c) {
+    UINT64 t = mad_tick(); (MTLComputeCommandEncoder_encodeCommands)(e, c);
+    InterlockedExchangeAdd64(&g_es_enc_t, (LONG64)(mad_tick() - t)); InterlockedIncrement(&g_es_enc_n);
+}
+static void mad_es_bce(obj_handle_t e, const struct wmtcmd_base *c) {
+    UINT64 t = mad_tick(); (MTLBlitCommandEncoder_encodeCommands)(e, c);
+    InterlockedExchangeAdd64(&g_es_enc_t, (LONG64)(mad_tick() - t)); InterlockedIncrement(&g_es_enc_n);
+}
+static obj_handle_t mad_es_renc(obj_handle_t cb, struct WMTRenderPassInfo *i) {
+    UINT64 t = mad_tick(); obj_handle_t r = (MTLCommandBuffer_renderCommandEncoder)(cb, i);
+    InterlockedExchangeAdd64(&g_es_open_t, (LONG64)(mad_tick() - t)); InterlockedIncrement(&g_es_open_n); return r;
+}
+static obj_handle_t mad_es_cenc(obj_handle_t cb, bool concurrent) {
+    UINT64 t = mad_tick(); obj_handle_t r = (MTLCommandBuffer_computeCommandEncoder)(cb, concurrent);
+    InterlockedExchangeAdd64(&g_es_open_t, (LONG64)(mad_tick() - t)); InterlockedIncrement(&g_es_open_n); return r;
+}
+static obj_handle_t mad_es_benc(obj_handle_t cb) {
+    UINT64 t = mad_tick(); obj_handle_t r = (MTLCommandBuffer_blitCommandEncoder)(cb);
+    InterlockedExchangeAdd64(&g_es_open_t, (LONG64)(mad_tick() - t)); InterlockedIncrement(&g_es_open_n); return r;
+}
+static void mad_es_end(obj_handle_t e) {
+    UINT64 t = mad_tick(); (MTLCommandEncoder_endEncoding)(e);
+    InterlockedExchangeAdd64(&g_es_open_t, (LONG64)(mad_tick() - t));
+}
+#define MTLRenderCommandEncoder_encodeCommands(e_, c_) mad_es_rce((e_), (c_))
+#define MTLComputeCommandEncoder_encodeCommands(e_, c_) mad_es_cce((e_), (c_))
+#define MTLBlitCommandEncoder_encodeCommands(e_, c_) mad_es_bce((e_), (c_))
+#define MTLCommandBuffer_renderCommandEncoder(cb_, i_) mad_es_renc((cb_), (i_))
+#define MTLCommandBuffer_computeCommandEncoder(cb_, c_) mad_es_cenc((cb_), (c_))
+#define MTLCommandBuffer_blitCommandEncoder(cb_) mad_es_benc((cb_))
+#define MTLCommandEncoder_endEncoding(e_) mad_es_end((e_))
 /* madeira-bcd: where pipeline creation time goes -- the "Compiling shaders"
  * screen and the stalls at first draw. QPC ticks, summed over all threads. */
 static volatile LONG64 g_pt_gfx, g_pt_cs, g_pt_conv, g_pt_lib, g_pt_rs, g_pt_realize;
@@ -4804,6 +4867,7 @@ tess_go:
     }
     if (dev->nsrv > 190 && !said_trunc++)
         d3d12_log("[madeira-d3d12] residency list truncated at 256 per draw (%u views); a real residency set is owed\n", dev->nsrv);
+    InterlockedExchangeAdd(&g_es_use_n, (LONG)nur);   /* madeira-bcd: encode split */
 #undef MAD_USE
     if (e->enc_depth && (e->pso->dsso || dev->dsso)) {
         memset(&c_dss, 0, sizeof c_dss); c_dss.type = WMTRenderCommandSetDSSO;
@@ -5405,6 +5469,7 @@ static void exec_dispatch(struct mad_exec *e, const struct mad_cmd *c) {
     const int ml1060_cskip = dev->resset && dev->nsrv > 256;   /* same reasoning as exec_draw */
     for (i = 0; !ml1060_cskip && i < dev->nsrv && nur < 256; i++) { struct mad_resource *r = dev->srv_res[i]; if (r) MAD_CUSE(r->texture ? r->texture : r->buffer, WMTResourceUsageRead); }
     for (i = 0; !ml1060_cskip && i < dev->nuav && nur < 256; i++) { struct mad_resource *r = dev->uav_res[i]; if (r) MAD_CUSE(r->texture ? r->texture : r->buffer, (enum WMTResourceUsage)(WMTResourceUsageRead | WMTResourceUsageWrite)); }
+    InterlockedExchangeAdd(&g_es_use_n, (LONG)nur);   /* madeira-bcd: encode split */
 #undef MAD_CUSE
     if (c->kind == MC_DISPATCH_INDIRECT) {
         memset(&c_dispi, 0, sizeof c_dispi);
@@ -5830,6 +5895,15 @@ static void mad_perf_present(void) {
                       g_perf_presents ? 1000.0 * g_perf_present_ticks / (double)fq.QuadPart / g_perf_presents : 0.0,
                       g_perf_presents ? 1000.0 * wall / g_perf_presents : 0.0);
             g_perf_ecl_ticks = 0; g_perf_present_ticks = 0;
+            {   /* madeira-bcd: the encode split (see mad_tick) */
+                double tf = (double)mad_tick_freq(), np = g_perf_presents ? (double)g_perf_presents : 1.0;
+                LONG64 et = InterlockedExchange64(&g_es_enc_t, 0), ot = InterlockedExchange64(&g_es_open_t, 0);
+                LONG en = InterlockedExchange(&g_es_enc_n, 0), on = InterlockedExchange(&g_es_open_n, 0), un = InterlockedExchange(&g_es_use_n, 0);
+                d3d12_log("[perf] encode split per frame: Metal encode calls %.2f ms (%.0f calls, %.1f us each), encoder open+end %.2f ms (%.0f encoders), "
+                          "useResource entries %.0f (the rest of ExecuteCommandLists is the replay itself)\n",
+                          1000.0 * (double)et / tf / np, en / np, en ? 1e6 * (double)et / tf / en : 0.0,
+                          1000.0 * (double)ot / tf / np, on / np, un / np);
+            }
             if (g_async_submit > 0)
                 d3d12_log("[perf] ml1120 async per frame: worker busy %.2f ms (%.1f jobs), Present drain %.2f ms, list Reset waits %.2f ms (%.1f), queue-Wait jobs blocked %.2f ms\n",
                           g_perf_presents ? 1000.0 * g_perf_worker_ticks / (double)fq.QuadPart / g_perf_presents : 0.0,
@@ -9584,10 +9658,12 @@ static int mad_sc_init(void) {
                    (mad_cfg_str_pe("env.MADEIRA_IR_NO_BOUNDS_CHECK", v, sizeof v) && v[0] == '1');
             agsrt = GetEnvironmentVariableA("MADEIRA_AGS_ROUNDTRIP_ONLY", v, sizeof v) != 0 ||
                     mad_cfg_str_pe("env.MADEIRA_AGS_ROUNDTRIP_ONLY", v, sizeof v);
-            snprintf(g_sc_rt, sizeof g_sc_rt, "vsps-fill %d, no-bounds-check %d, ags-roundtrip %d, msc %d%d%d",
+            snprintf(g_sc_rt, sizeof g_sc_rt, "vsps-fill %d, no-bounds-check %d, ags-roundtrip %d, msc %d%d%d%d%d",
                      mad_cfg_int_pe("vsps-fill", 1) ? 1 : 0, nobc, agsrt,
                      mad_cfg_int_pe("msc-position-invariance", 1) ? 1 : 0, mad_cfg_int_pe("msc-strict-nan", 1) ? 1 : 0,
-                     mad_cfg_int_pe("msc-sampler-lod-bias", 1) ? 1 : 0);
+                     mad_cfg_int_pe("msc-sampler-lod-bias", 1) ? 1 : 0,
+                     mad_cfg_int_pe("msc-sample-nan-zero", 1) ? 1 : 0,       /* madeira-bcd: madeira_ir_unix.mm, build 217 */
+                     mad_cfg_int_pe("msc-position-inf-nan", 1) ? 1 : 0);
             mad_sc_stamp_init();
             mad_sc_feed(&h, g_sc_stamp, strlen(g_sc_stamp) + 1);
             mad_sc_feed(&h, g_sc_rt, sizeof g_sc_rt);

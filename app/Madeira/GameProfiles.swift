@@ -108,6 +108,17 @@ struct GameProfile {
     static let tessChoices: [(String, String)] = [("", "Default (3)"), ("2", "Low (2)"), ("4", "Medium (4)"),
                                                    ("8", "High (8)"), ("0", "Full (no cap)")]
 
+    /// ml1120/ml1121 async-submit: the D3D12 runtime encodes the game's command
+    /// lists on its own worker thread instead of inside the game's
+    /// ExecuteCommandLists (10-16 ms of every Ghost of Tsushima frame in the
+    /// 2026-09-28 14:04 log).
+    static let submitChoices: [(String, String)] = [("", "Game's thread (default)"), ("1", "Worker thread")]
+
+    /// fence-chain: F1 = every GPU pass waits for the one before (accurate,
+    /// default); F6 = only where the game's barriers say so (the GPU overlaps
+    /// work; the overlay's F pill switches the same thing live).
+    static let gpuSyncChoices: [(String, String)] = [("", "Every pass (F1, default)"), ("6", "Barriers only (F6)")]
+
     var frameLimit: FrameLimit? {
         switch get("fps-limit") {
         case "30": return .locked30

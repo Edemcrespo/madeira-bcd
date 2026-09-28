@@ -61,6 +61,7 @@
 		A1000206 /* SessionUI.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000206 /* SessionUI.swift */; };
 		A1000207 /* UpdatePacks.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000207 /* UpdatePacks.swift */; };
 		A1000208 /* GameProfiles.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000208 /* GameProfiles.swift */; };
+		A1000209 /* StorageSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000209 /* StorageSection.swift */; };
 		A1000202 /* FPSOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000202 /* FPSOverlay.swift */; };
 		A1000243 /* GamepadInput.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000243 /* GamepadInput.swift */; };
 		A1000244 /* Winios/WiniosGamepad.c in Sources */ = {isa = PBXBuildFile; fileRef = A2000244 /* Winios/WiniosGamepad.c */; };
@@ -134,6 +135,7 @@
 		A2000206 /* SessionUI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionUI.swift; sourceTree = "<group>"; };
 		A2000207 /* UpdatePacks.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdatePacks.swift; sourceTree = "<group>"; };
 		A2000208 /* GameProfiles.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GameProfiles.swift; sourceTree = "<group>"; };
+		A2000209 /* StorageSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StorageSection.swift; sourceTree = "<group>"; };
 		A2000202 /* FPSOverlay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FPSOverlay.swift; sourceTree = "<group>"; };
 		A2000243 /* GamepadInput.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "GamepadInput.swift"; sourceTree = "<group>"; };
 		A2000244 /* Winios/WiniosGamepad.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = "Winios/WiniosGamepad.c"; sourceTree = "<group>"; };
@@ -203,6 +205,7 @@
 				A2000206 /* SessionUI.swift */,
 				A2000207 /* UpdatePacks.swift */,
 				A2000208 /* GameProfiles.swift */,
+				A2000209 /* StorageSection.swift */,
 				A2000004 /* JITAllocator.c */,
 				A2000005 /* JITAllocator.h */,
 				A200000B /* FEXBridge.mm */,
@@ -388,6 +391,7 @@
 				A1000206 /* SessionUI.swift in Sources */,
 				A1000207 /* UpdatePacks.swift in Sources */,
 				A1000208 /* GameProfiles.swift in Sources */,
+				A1000209 /* StorageSection.swift in Sources */,
 				A1000004 /* JITAllocator.c in Sources */,
 				A1000005 /* EntitlementChecker.swift in Sources */,
 				A1000006 /* FEXBridge.mm in Sources */,

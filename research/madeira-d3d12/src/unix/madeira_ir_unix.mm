@@ -1382,7 +1382,18 @@ extern "C" int madeira_ir_convert_impl(struct madeira_ir_convert_args *a) {
      * - msc-sampler-lod-bias: apply D3D12_SAMPLER_DESC::MipLODBias. Metal
      *   samplers have no LOD bias; the runtime already writes it into every
      *   sampler descriptor's metadata (IRDescriptorTableSetSampler), but the
-     *   converted shader reads it only with this flag. */
+     *   converted shader reads it only with this flag.
+     * madeira-bcd (build 217), two more of the converter's D3D behaviours, for
+     * Ghost of Tsushima's dark specks and smears around fire and smoke:
+     * - msc-sample-nan-zero: a texture sample that comes back NaN reads 0. The
+     *   game clears its RG16F velocity target to NaN as a "not written" marker
+     *   (see msc-strict-nan); a filtered read across such texels is NaN on
+     *   Metal, and a NaN that reaches the temporal resolve stays in its history
+     *   and spreads as black specks. D3D hardware does not hand those NaNs on.
+     * - msc-position-inf-nan: a vertex position of +-Inf becomes NaN, which
+     *   Metal discards like D3D does. Particle systems kill particles by
+     *   writing an infinite position; kept as Inf, Metal can rasterise a
+     *   screen-sized sliver instead of nothing. */
     {
         static int no_bc = -1, extra = -1;
         if (no_bc < 0) { const char *v = getenv("MADEIRA_IR_NO_BOUNDS_CHECK"); no_bc = v && v[0] == '1'; }
@@ -1390,16 +1401,22 @@ extern "C" int madeira_ir_convert_impl(struct madeira_ir_convert_args *a) {
             int inv = madeira_cfg_int("msc-position-invariance", 1) ? 1 : 0;
             int nan = madeira_cfg_int("msc-strict-nan", 1) ? 1 : 0;
             int lod = madeira_cfg_int("msc-sampler-lod-bias", 1) ? 1 : 0;
+            int snz = madeira_cfg_int("msc-sample-nan-zero", 1) ? 1 : 0;
+            int pin = madeira_cfg_int("msc-position-inf-nan", 1) ? 1 : 0;
             int e = (inv ? (int)IRCompatibilityFlagPositionInvariance : 0) |
-                    (lod ? (int)IRCompatibilityFlagSamplerLODBias : 0);
+                    (lod ? (int)IRCompatibilityFlagSamplerLODBias : 0) |
+                    (snz ? (int)IRCompatibilityFlagSampleNanToZero : 0) |
+                    (pin ? (int)IRCompatibilityFlagVertexPositionInfToNan : 0);
 #if IR_VERSION_MAJOR >= 4
             if (nan) e |= (int)IRCompatibilityFlagDisableNanInfOptimization;
 #endif
             extra = e;   /* one store: another converting thread sees -1 or the whole value */
             fprintf(stderr, "[madeira-ir] MSC %d.%d.%d compatibility: position invariance %s, strict NaN/Inf %s, "
-                            "sampler LOD bias %s, bounds check %s (madeira.cfg msc-position-invariance, "
-                            "msc-strict-nan, msc-sampler-lod-bias)\n", IR_VERSION_MAJOR, IR_VERSION_MINOR, IR_VERSION_PATCH,
-                    inv ? "on" : "off", nan ? "on" : "off", lod ? "on" : "off", no_bc ? "off" : "on");
+                            "sampler LOD bias %s, sampled NaN -> 0 %s, Inf position -> NaN %s, bounds check %s "
+                            "(madeira.cfg msc-position-invariance, msc-strict-nan, msc-sampler-lod-bias, "
+                            "msc-sample-nan-zero, msc-position-inf-nan)\n", IR_VERSION_MAJOR, IR_VERSION_MINOR, IR_VERSION_PATCH,
+                    inv ? "on" : "off", nan ? "on" : "off", lod ? "on" : "off", snz ? "on" : "off", pin ? "on" : "off",
+                    no_bc ? "off" : "on");
         }
         g_ir.IRCompilerSetCompatibilityFlags(compiler, (IRCompatibilityFlags)(IRCompatibilityFlagForceTextureArray |
                                              (no_bc ? 0 : IRCompatibilityFlagBoundsCheck) | extra));

@@ -306,7 +306,15 @@ already did.
   `MipLODBias`, which the runtime already writes into each sampler
   descriptor's metadata; Metal samplers have no bias of their own). The
   start-up line `[madeira-ir] MSC 4.0.1 compatibility: ...` shows the state;
-  the PE shader cache keys on all three. Non-zero biases are logged
+  the PE shader cache keys on all of them. Build 217 adds two more, also on by
+  default, for Ghost of Tsushima's dark specks and smears around fire and
+  smoke: `msc-sample-nan-zero` (`IRCompatibilityFlagSampleNanToZero`: a sample
+  that comes back NaN reads 0 -- a filtered read across the NaN-cleared
+  velocity target is NaN on Metal, and a NaN that reaches the temporal resolve
+  stays in its history and spreads) and `msc-position-inf-nan`
+  (`IRCompatibilityFlagVertexPositionInfToNan`: an infinite vertex position,
+  how particle systems kill a particle, becomes NaN, which Metal discards like
+  D3D instead of rasterising a sliver). Non-zero biases are logged
   (`sampler with MipLODBias`, `static sampler sN with MipLODBias`).
 - GPU fault attribution (`mad_fault_*`, `tools/patch-dxmt-gpu-fault-info.py`):
   batch command buffers are created with
@@ -583,6 +591,15 @@ already did.
   after it. Any setup failure logs and keeps the plain copy. D3D11 games use
   DXMT's own MetalFX swapchain (`DXMT_METALFX_SPATIAL_SWAPCHAIN=1`,
   `d3d11.metalSpatialUpscaleFactor`).
+- Settings > Storage (`StorageSection.swift`): sizes of frame captures,
+  session logs, the D3D12 shader cache (every profile's
+  `AppData\Local\Madeira\ShaderCache`), the D3D11 shader cache, the update pack
+  and the whole Windows drive, with delete buttons (confirmed) for the first
+  four.
+- Game sheet, D3D12 experiments: "command encoding" (`async-submit`, ml1120:
+  the runtime replays command lists on a worker instead of inside the game's
+  ExecuteCommandLists) and "GPU sync" (`fence-chain` 6 instead of 1); the
+  overlay's F pill starts from the game's value.
 - Performance overlay: a thermal-state pill (OK / WARM / HOT / CRIT from
   `ProcessInfo.thermalState`); transitions are logged as `[thermal]` with the
   FPS at that moment, and every `[present]` line carries the state and low

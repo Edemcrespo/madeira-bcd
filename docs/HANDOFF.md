@@ -643,6 +643,36 @@ tracked DLL and stay green).
   build and never lost the old ones; entries of earlier builds are removed
   once per build (log: `DXBC shader cache: removed N entries`).
 
+### Build 217: GoT specks/smears flags, experiments in the sheet, storage (2026-09-28)
+Log analysis (13:21 and 14:04 logs, builds 211/212):
+* 13:21 "40-45 then 20 FPS": the `[perf] ml1108` GPU time per frame jumps
+  from 17-20 ms to 37-44 ms while ExecuteCommandLists stays ~2 ms; the game
+  then waits 33-39 ms/frame on its fences. GPU-bound, the particle
+  tessellation growth capped in 213 (`dxil-tess-max-factor`).
+* 14:04 gameplay: frame 38-42 ms = GPU 19-20 ms (not the limit) +
+  ExecuteCommandLists 10-16 ms ON THE GAME'S RENDER THREAD (~630 draws,
+  ~5,600 commands a frame) + 4-8 ms fence waits. `async-submit = 1` moves our
+  encode to a worker (RDR2 upstream saw no gain because its render thread
+  was not the critical path; GoT may differ). Now a picker in the game sheet.
+* ~220 GPU encoders a frame, each waiting for the previous one under
+  fence-chain 1; the F6 picker/pill lets passes overlap.
+* Render passes always Load/Store (no pending clear); census frames show
+  ~225 MB loaded + ~241 MB stored, 170 MB of it never used again in the same
+  list. Cross-list use is unknown, so no DontCare yet -- a candidate for a
+  frame-level analysis.
+Also in 217: the `[perf] encode split per frame` line (time inside the Metal
+encode unix calls vs encoder open/end vs the replay itself, and the
+useResource entries per frame) to find where ExecuteCommandLists' 10-16 ms
+go before optimising it; Settings > Storage; the D3D12 experiment pickers.
+(Run 216 was the automatic main-push duplicate, cancelled.)
+The specks in the owner's screenshots sit on the fire-lit smoke and rock by
+the bridge and come and go between frames: NaN/Inf, most likely through the
+NaN-cleared velocity target into the temporal resolve, or particles killed
+with an infinite position. Build 217 turns on `IRCompatibilityFlagSampleNanToZero`
+and `IRCompatibilityFlagVertexPositionInfToNan` (`msc-sample-nan-zero`,
+`msc-position-inf-nan`, both default 1; the shader cache keys on them, so the
+first start converts again).
+
 ### Build 215: update packs, per-game config, MetalFX, thermal (2026-09-28)
 The owner is tired of signing and installing an IPA per experiment, so the
 iteration loop moved in-app (see section 2, "Update packs"). Also:

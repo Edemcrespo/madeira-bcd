@@ -954,6 +954,8 @@ struct GameSettingsSheet: View {
     @State private var metalFX: String
     @State private var fpsLimit: String
     @State private var tess: String
+    @State private var submit: String
+    @State private var gpuSync: String
     @State private var photo: PhotosPickerItem?
     @State private var tick = 0
 
@@ -975,6 +977,8 @@ struct GameSettingsSheet: View {
         _metalFX = State(initialValue: profile.get("metalfx-upscale") ?? "")
         _fpsLimit = State(initialValue: profile.get("fps-limit") ?? "")
         _tess = State(initialValue: profile.get("dxil-tess-max-factor") ?? "")
+        _submit = State(initialValue: profile.get("async-submit") ?? "")
+        _gpuSync = State(initialValue: profile.get("fence-chain") ?? "")
     }
 
     private var profile: GameProfile { GameProfile(windowsPath: exePath) }
@@ -983,6 +987,8 @@ struct GameSettingsSheet: View {
         metalFX = profile.get("metalfx-upscale") ?? ""
         fpsLimit = profile.get("fps-limit") ?? ""
         tess = profile.get("dxil-tess-max-factor") ?? ""
+        submit = profile.get("async-submit") ?? ""
+        gpuSync = profile.get("fence-chain") ?? ""
     }
 
     /// A picker over (value, label) pairs that also shows a value typed into the raw file.
@@ -1117,6 +1123,8 @@ struct GameSettingsSheet: View {
                     choicePicker("MetalFX upscaling", $metalFX, GameProfile.metalFXChoices)
                     choicePicker("FPS limit at start", $fpsLimit, GameProfile.fpsChoices)
                     choicePicker("Tessellation detail (D3D12)", $tess, GameProfile.tessChoices)
+                    choicePicker("D3D12 command encoding", $submit, GameProfile.submitChoices)
+                    choicePicker("GPU sync (D3D12)", $gpuSync, GameProfile.gpuSyncChoices)
                     NavigationLink {
                         GameConfigEditor(profile: profile, onSave: { loadProfile() })
                     } label: {
@@ -1129,8 +1137,11 @@ struct GameSettingsSheet: View {
                          + "or 2× with Apple's scaler, so a small screen size (960x540, 1280x720) for frame rate "
                          + "still looks crisp. FPS limit at start is the cap the session opens with; 30 or 40 "
                          + "keeps the frame rate even when the phone warms up. Tessellation detail caps the D3D12 "
-                         + "runtime's low-detail tessellation (particles, grass); Full costs GPU time. The "
-                         + "advanced file takes any madeira.cfg key or env.NAME line for this game only.")
+                         + "runtime's low-detail tessellation (particles, grass); Full costs GPU time. "
+                         + "Command encoding on a worker thread takes the D3D12 runtime's own work off the "
+                         + "game's render thread. GPU sync \"Barriers only\" lets GPU passes overlap where the "
+                         + "game allows it (faster; if something flickers, go back). The advanced file takes any "
+                         + "madeira.cfg key or env.NAME line for this game only.")
                 }
 
                 Section {
@@ -1213,6 +1224,8 @@ struct GameSettingsSheet: View {
         if p.get("metalfx-upscale") ?? "" != metalFX { p.set("metalfx-upscale", metalFX) }
         if p.get("fps-limit") ?? "" != fpsLimit { p.set("fps-limit", fpsLimit) }
         if p.get("dxil-tess-max-factor") ?? "" != tess { p.set("dxil-tess-max-factor", tess) }
+        if p.get("async-submit") ?? "" != submit { p.set("async-submit", submit) }
+        if p.get("fence-chain") ?? "" != gpuSync { p.set("fence-chain", gpuSync) }
     }
 }
 
@@ -1242,6 +1255,8 @@ struct AppSettingsSheet: View {
                 }
 
                 UpdatesSection()
+
+                StorageSection()
 
                 Section {
                     Button { FilesApp.openDriveC() } label: {
