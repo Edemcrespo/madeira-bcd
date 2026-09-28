@@ -1484,6 +1484,10 @@ struct mad_exec {
     unsigned cur;               /* ml1137: index of the command being replayed */
     UINT64 f7_mask; int f7_all, f7_open, f7_reason;   /* ml1137: what a state-aware barrier rule would wait for (census only) */
     int f7_next_rts;            /* ml1137: exec_end called by exec_begin_render: rt/depth are the NEXT pass's targets */
+    /* madeira-bcd: resources already declared (useResource) on the current
+     * encoder -- see mad_use_seen */
+    obj_handle_t ud_enc; unsigned ud_n, ud_committed;
+    struct { obj_handle_t h; UINT32 usage, stages; } ud[96];
     /* madeira-bcd: GPU fault attribution (mad_fault_*), only after a first fault */
     struct mad_pso *cenc_pso;   /* the one pipeline the open compute encoder runs */
     unsigned cenc_seq;          /* its label's C#<seq> */
@@ -4531,6 +4535,38 @@ static void mad_capture_flush(struct mad_device *d) {
     d->ncap = 0; d->cap_used = 0;
 }
 
+/* madeira-bcd: ONE useResource PER RESOURCE AND ENCODER. Every draw and
+ * dispatch re-declared the heaps and the list's root-descriptor resources
+ * (up to 64) on its encoder, although a declaration holds for the rest of the
+ * encoder; each is an Objective-C call on the unix side inside the replay the
+ * game's render thread waits for. Returns 1 when `h` is already declared on
+ * `enc` with at least this usage and these stages. Encoders stay alive until
+ * the replay's autorelease pool drains, so a handle is never reused within a
+ * list. madeira.cfg use-dedup = 0 restores a declaration per call. */
+static volatile LONG g_es_use_skipped;
+static int g_use_dedup = -1;
+/* A draw's declarations count only once its chain has been encoded: a draw
+ * that returns early leaves them uncommitted, and the next begin drops them. */
+static void mad_use_begin(struct mad_exec *e, obj_handle_t enc) {
+    if (e->ud_enc != enc) { e->ud_enc = enc; e->ud_n = e->ud_committed = 0; }
+    else e->ud_n = e->ud_committed;
+}
+static void mad_use_commit(struct mad_exec *e) { e->ud_committed = e->ud_n; }
+static int mad_use_seen(struct mad_exec *e, obj_handle_t enc, obj_handle_t h, UINT32 usage, UINT32 stages) {
+    unsigned i;
+    if (g_use_dedup < 0) g_use_dedup = mad_cfg_int_pe("use-dedup", 1) ? 1 : 0;
+    if (!g_use_dedup || !enc || !h || e->ud_enc != enc) return 0;
+    for (i = 0; i < e->ud_n; i++)
+        if (e->ud[i].h == h && (e->ud[i].usage & usage) == usage && (e->ud[i].stages & stages) == stages) {
+            InterlockedIncrement(&g_es_use_skipped);
+            return 1;
+        }
+    if (e->ud_n < sizeof e->ud / sizeof e->ud[0]) {
+        e->ud[e->ud_n].h = h; e->ud[e->ud_n].usage = usage; e->ud[e->ud_n].stages = stages; e->ud_n++;
+    }
+    return 0;
+}
+
 static void exec_draw(struct mad_exec *e, const struct mad_cmd *c) {
     struct wmtcmd_render_setpso c_pso;
     struct wmtcmd_render_draw_indirect c_di;
@@ -4836,9 +4872,13 @@ tess_go:
 #undef MAD_SETBUF_VS
 #undef MAD_SETBUF
     /* ml1130: no 8 KB clear per draw; each entry is zeroed as it is used */
-#define MAD_USE(h) do { if ((h) && nur < 256) { memset(&ur[nur], 0, sizeof ur[nur]); ur[nur].type = WMTRenderCommandUseResource; ur[nur].resource = (h); \
-        ur[nur].usage = WMTResourceUsageRead; ur[nur].stages = (enum WMTRenderStages)((gsemu || tv) ? (WMTRenderStageObject | WMTRenderStageMesh | WMTRenderStageFragment) : (WMTRenderStageVertex | WMTRenderStageFragment)); \
+    const UINT32 use_stages = (UINT32)((gsemu || tv) ? (WMTRenderStageObject | WMTRenderStageMesh | WMTRenderStageFragment) : (WMTRenderStageVertex | WMTRenderStageFragment));
+    mad_use_begin(e, e->renc);   /* madeira-bcd */
+#define MAD_USE_U(h, u) do { if ((h) && nur < 256 && !mad_use_seen(e, e->renc, (h), (UINT32)(u), use_stages)) { \
+        memset(&ur[nur], 0, sizeof ur[nur]); ur[nur].type = WMTRenderCommandUseResource; ur[nur].resource = (h); \
+        ur[nur].usage = (enum WMTResourceUsage)(u); ur[nur].stages = (enum WMTRenderStages)use_stages; \
         MAD_APPEND(&ur[nur]); nur++; } } while (0)
+#define MAD_USE(h) MAD_USE_U(h, WMTResourceUsageRead)
     if (e->srv) MAD_USE(e->srv->buffer);
     if (e->smp) MAD_USE(e->smp->buffer);
     if (gsemu || tv || e->pso->backend == MADEIRA_IR_BACKEND_AIRCONV) {   /* ml927: the object stage reads vertices and indices through the tables, not encoder bindings; ml1105: so does the DXBC vertex stage */
@@ -4863,12 +4903,13 @@ tess_go:
     }
     for (i = 0; !ml1060_skip_lists && i < dev->nuav && nur < 256; i++) {
         struct mad_resource *r = dev->uav_res[i];
-        if (r) { MAD_USE(r->texture ? r->texture : r->buffer); ur[nur - 1].usage = (enum WMTResourceUsage)(WMTResourceUsageRead | WMTResourceUsageWrite); }
+        if (r) MAD_USE_U(r->texture ? r->texture : r->buffer, WMTResourceUsageRead | WMTResourceUsageWrite);
     }
     if (dev->nsrv > 190 && !said_trunc++)
         d3d12_log("[madeira-d3d12] residency list truncated at 256 per draw (%u views); a real residency set is owed\n", dev->nsrv);
     InterlockedExchangeAdd(&g_es_use_n, (LONG)nur);   /* madeira-bcd: encode split */
 #undef MAD_USE
+#undef MAD_USE_U
     if (e->enc_depth && (e->pso->dsso || dev->dsso)) {
         memset(&c_dss, 0, sizeof c_dss); c_dss.type = WMTRenderCommandSetDSSO;
         c_dss.dsso = e->pso->dsso ? e->pso->dsso : dev->dsso;
@@ -5060,6 +5101,7 @@ tess_go:
         }
         if (want != ~(UINT64)0) v->dirty = 1;
     }
+    mad_use_commit(e);   /* madeira-bcd: this draw's useResource entries reached the encoder */
 #undef MAD_APPEND
     e->draws++; e->pass_draws++;   /* ml1098 */
     if (e->nrt && e->rt[0] && e->rtp[0].layers > 1) {   /* ml926: layered draws */
@@ -5458,7 +5500,9 @@ static void exec_dispatch(struct mad_exec *e, const struct mad_cmd *c) {
     }
 #undef MAD_CSETBUF
     /* ml1130: no 8 KB clear per dispatch; each entry is zeroed as it is used */
-#define MAD_CUSE(h, u) do { if ((h) && nur < 256) { memset(&ur[nur], 0, sizeof ur[nur]); ur[nur].type = WMTComputeCommandUseResource; ur[nur].resource = (h); \
+    mad_use_begin(e, e->cenc);   /* madeira-bcd: one declaration per resource and encoder */
+#define MAD_CUSE(h, u) do { if ((h) && nur < 256 && !mad_use_seen(e, e->cenc, (h), (UINT32)(u), 0)) { \
+        memset(&ur[nur], 0, sizeof ur[nur]); ur[nur].type = WMTComputeCommandUseResource; ur[nur].resource = (h); \
         ur[nur].usage = (u); MAD_APPEND(&ur[nur]); nur++; } } while (0)
     if (e->srv) MAD_CUSE(e->srv->buffer, WMTResourceUsageRead);
     if (e->smp) MAD_CUSE(e->smp->buffer, WMTResourceUsageRead);
@@ -5486,6 +5530,7 @@ static void exec_dispatch(struct mad_exec *e, const struct mad_cmd *c) {
     tail->next.ptr = NULL;
 #undef MAD_APPEND
     MTLComputeCommandEncoder_encodeCommands(e->cenc, (const struct wmtcmd_base *)&c_pso);
+    mad_use_commit(e);   /* madeira-bcd */
     e->draws++;
     if (g_capture_on && g_cap_uav) mad_capture_dispatch_outputs(e, c);   /* madeira-bcd: contact sheets */
     if (e->ncap_after_buf) {   /* ml922 */
@@ -5899,10 +5944,11 @@ static void mad_perf_present(void) {
                 double tf = (double)mad_tick_freq(), np = g_perf_presents ? (double)g_perf_presents : 1.0;
                 LONG64 et = InterlockedExchange64(&g_es_enc_t, 0), ot = InterlockedExchange64(&g_es_open_t, 0);
                 LONG en = InterlockedExchange(&g_es_enc_n, 0), on = InterlockedExchange(&g_es_open_n, 0), un = InterlockedExchange(&g_es_use_n, 0);
+                LONG us = InterlockedExchange(&g_es_use_skipped, 0);
                 d3d12_log("[perf] encode split per frame: Metal encode calls %.2f ms (%.0f calls, %.1f us each), encoder open+end %.2f ms (%.0f encoders), "
-                          "useResource entries %.0f (the rest of ExecuteCommandLists is the replay itself)\n",
+                          "useResource entries %.0f (%.0f already declared, skipped; madeira.cfg use-dedup) -- the rest of ExecuteCommandLists is the replay itself\n",
                           1000.0 * (double)et / tf / np, en / np, en ? 1e6 * (double)et / tf / en : 0.0,
-                          1000.0 * (double)ot / tf / np, on / np, un / np);
+                          1000.0 * (double)ot / tf / np, on / np, un / np, us / np);
             }
             if (g_async_submit > 0)
                 d3d12_log("[perf] ml1120 async per frame: worker busy %.2f ms (%.1f jobs), Present drain %.2f ms, list Reset waits %.2f ms (%.1f), queue-Wait jobs blocked %.2f ms\n",
