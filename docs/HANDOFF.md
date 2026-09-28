@@ -647,6 +647,32 @@ tracked DLL and stay green).
   build and never lost the old ones; entries of earlier builds are removed
   once per build (log: `DXBC shader cache: removed N entries`).
 
+### Pack 6: F0 no longer poisons the session (logs and videos 2026-09-28 20:35-20:41, pack 5)
+* Videos matched to the 20:35 log through the HUD frame number (roughly the
+  present count). At 20:36:41 (F1, no switch yet) the scene is intact but
+  edges are jagged, dotted and blocky: character outline, fur, rock and
+  wooden structures. It looks like the game's temporal upscaler/AA not
+  resolving; libxess.dll is loaded, so the owner is to try the in-game
+  upscaler options. 20:37:19 is F0: garbage expected. 20:37:44 is F1 AFTER
+  F0: the scene goes black and blotchy.
+* Cause of the last one: every GPU fault under F0 (no fences, i.e. races by
+  design) was treated as a broken shader. `mad_fault_report` marked the
+  cs_main pipelines to skip (15+ in that run) and switched the fault
+  diagnostics on (one pipeline per compute encoder, labels) for the rest of
+  the session. All F1/F5/F6 observations after an F0 test in the same run
+  were invalid, and so was the 18:56 log. Pack 6: faults are not marked
+  while F0 is in effect or for 8 presents after it; leaving F0 clears the
+  skip list and the diagnostics.
+* 20:41 (MetalFX 2x): the C++ exception fast-fail again, this time in
+  gameplay, with the same stack (GhostOfTsushima+0x449681 recursion,
+  +0x40a99d, VCRUNTIME140_1 frame handler, handler +0xd15f0c). Pack 5 did
+  not fix it, so it is not the device list race. Next step is native
+  (unwind / dispatcher-context diagnostics), so an IPA.
+* 20:39 async-submit = 1: ExecuteCommandLists costs the game thread 0.03 ms;
+  the worker is busy ~16 ms per frame and the game waits on its fences
+  10 ms per frame (24 %) at the end. Thermal was WARM from the start; no
+  clear win yet.
+
 ### Pack 5: device list race fixed (logs 2026-09-28 18:53 and 18:56, IPA 218 + pack 4)
 * 18:56 crash: AV in the ntdll heap (ntdll+0x29634) under
   `device_CreateSampler -> mad_note_sampler -> mad_grow` (realloc) on thread

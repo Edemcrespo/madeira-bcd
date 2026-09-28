@@ -1570,6 +1570,14 @@ static void mad_vis_flush(struct mad_queue *q, obj_handle_t cb);
 static long long mad_cfg_int_pe(const char *key, long long dflt);
 /* ml1091 */
 static int g_fence_chain = -1;   /* ml1110: madeira.cfg fence-chain = 0 disables the per-encoder fence (perf experiment; expect flicker) */
+/* madeira-bcd: GPU faults while fences are off (F0) are the experiment's own
+ * races, not broken shaders. Marking them left compute pipelines skipped and
+ * the fault diagnostics on for the rest of the session, so F1/F5/F6 after an
+ * F0 test rendered with holes (owner's 2026-09-28 20:37 video). Faults are
+ * not marked in F0 and for a few presents after it (its lists still run);
+ * leaving F0 forgets what it marked. */
+static volatile LONG64 g_presents_now, g_f0_quiet_until;
+static int mad_f0_quiet(void) { return g_fence_chain == 0 || g_presents_now < g_f0_quiet_until; }
 static obj_handle_t mad_enc_fence(struct mad_device *d) {
     if (g_fence_chain < 0) { g_fence_chain = (int)mad_cfg_int_pe("fence-chain", 1); if (g_fence_chain < 0 || g_fence_chain > 6 || g_fence_chain == 4) g_fence_chain = 1;   /* ml1114: 2 was clamped to 1 in ml1110-ml1113 */
                              d3d12_log("[madeira-d3d12] ml1110 fence-chain = %d (%s)\n", g_fence_chain, g_fence_chain == 6 ? "ml1134: barrier-driven: an encoder waits for every pending encoder only after a ResourceBarrier, at a list start, or when it reuses a pending encoder's attachment; compute stays open across barriers" : g_fence_chain == 5 ? "ml1118: full chain; a render pass waits at its FRAGMENT stage unless a compute/blit encoder ran since the last vertex-stage wait" : g_fence_chain == 3 ? "ml1116: an encoder waits only after a barrier on a resource written since the last wait" : g_fence_chain == 2 ? "ml1111: an encoder waits only after a ResourceBarrier or at a list start" : g_fence_chain ? "every encoder waits for the previous one" : "NO inter-encoder fences: perf experiment"); }
@@ -2946,6 +2954,12 @@ static void mad_fault_report(obj_handle_t cb) {
     struct madeira_ctl_args a;
     char *out, *f;
     if (!mad_fault_info_on()) return;
+    if (mad_f0_quiet()) {
+        static LONG said_f0;
+        if (InterlockedIncrement(&said_f0) <= 4)
+            d3d12_log("[madeira-d3d12] GPU fault while fence-chain 0 (no fences) is in effect: expected, nothing marked or skipped\n");
+        return;
+    }
     if (!InterlockedExchange(&g_fault_diag, 1)) {
         g_enc_labels = 1;
         d3d12_log("[madeira-d3d12] GPU fault: labelling every encoder and running one pipeline per compute encoder from now on\n");
@@ -13215,8 +13229,17 @@ static void mad_present_run(struct mad_swapchain *s, UINT idx) {
             int want;
             memset(&a, 0, sizeof a); a.op = 6; MadeiraCtl(&a);
             want = (int)a.ret;
+            g_presents_now = (LONG64)s->presents;   /* madeira-bcd: mad_f0_quiet */
             if (want >= 1 && want <= 6 && want != 4 && want != g_fence_chain && g_fence_chain >= 0) {
                 d3d12_log("[madeira-d3d12] ml1136 fence-chain %d -> %d at present #%llu\n", g_fence_chain, want, (unsigned long long)s->presents);
+                if (g_fence_chain == 0) {   /* madeira-bcd: leaving F0 -- forget its faults */
+                    g_f0_quiet_until = (LONG64)s->presents + 8;
+                    if (g_fault_nbad || g_fault_diag)
+                        d3d12_log("[madeira-d3d12] leaving fence-chain 0: %ld skipped pipeline(s) restored, fault diagnostics off\n", (long)g_fault_nbad);
+                    InterlockedExchange(&g_fault_nbad, 0);
+                    InterlockedExchange(&g_fault_diag, 0);
+                    g_enc_labels = -1;   /* back to madeira.cfg encoder-labels */
+                }
                 g_fence_chain = want;
             } else if (a.ret == 7 && g_fence_chain != 0 && g_fence_chain >= 0) {   /* 7 = request mode 0 (0 means "no request") */
                 d3d12_log("[madeira-d3d12] ml1136 fence-chain %d -> 0 (NO fences, diagnostic) at present #%llu\n", g_fence_chain, (unsigned long long)s->presents);
