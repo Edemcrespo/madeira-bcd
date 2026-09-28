@@ -647,6 +647,36 @@ tracked DLL and stay green).
   build and never lost the old ones; entries of earlier builds are removed
   once per build (log: `DXBC shader cache: removed N entries`).
 
+### Pack 5: device list race fixed (logs 2026-09-28 18:53 and 18:56, IPA 218 + pack 4)
+* 18:56 crash: AV in the ntdll heap (ntdll+0x29634) under
+  `device_CreateSampler -> mad_note_sampler -> mad_grow` (realloc) on thread
+  00f0 while five game threads were streaming a new area. Symbols came from a
+  local `-g` build of 6bbd6b8: same .text size as pack 4, so the RVAs match.
+  `d->samplers`, `srv_res` and `uav_res` were grown, appended and
+  swap-removed without a lock, although D3D12 device methods are
+  free-threaded; two reallocs of one array corrupt the heap, and the heap
+  lock left held gave the 60 s `RtlpWaitForCriticalSection` timeout that
+  follows. It happened right after an F0 -> F1 pill switch, but the switch is
+  not involved. Pack 5: `list_lock` (SRWLOCK) guards the three lists;
+  membership is O(1) through `srv_slot` / `uav_slot` (the old linear scan
+  covered ~15,000 textures per view creation); the per-draw fallback loops
+  and `mad_texture_of_view` read under the shared lock. The heap corruption
+  may also explain some of the intermittent crashes before this one.
+* 18:53 crash: the known C++ exception fast-fail (handler
+  GhostOfTsushima.exe+0xd15f0c, 0xC0000409) while loading into the world;
+  see "Build 191 results". Still open. A corrupted heap is one possible
+  source, so check whether it recurs with pack 5.
+* Frame time (18:56, 1280x720, F1): steady 22-27 ms per frame. ExecuteCommandLists
+  takes 4-6 ms of that: Metal encode calls 0.66 ms (583 calls),
+  encoder open+end 1.76 ms (134 encoders), and the rest is the replay itself. Present
+  0.25 ms, the game blocked on fences 0 ms. The remaining ~18 ms is the
+  game's own CPU time under emulation, so draw batching on our side can win
+  1-2 ms at most. ECL spikes of 50-550 ms per frame are first-draw pipeline
+  compiles (`pso-lazy`) in new areas; the shader cache removes them on the
+  next visit. useResource dedup skips ~55 % of the entries in gameplay.
+* `[frame] ml1050` always says "no Present reached the presenter" for D3D12:
+  that reporter only sees DXMT's presenter. Not a bug in the game path.
+
 ### Build 218: saves backup, Home Screen shortcuts, useResource dedup (2026-09-28)
 * `madeira_d3d12`: one useResource per resource and encoder (`mad_use_seen`,
   `use-dedup`, default 1); a draw's entries are committed only after its

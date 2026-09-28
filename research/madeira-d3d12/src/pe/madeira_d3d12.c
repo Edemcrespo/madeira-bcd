@@ -228,6 +228,11 @@ struct mad_device {
     volatile LONG64 aidx_ver;   /* ml1132: odd while a writer changes aidx; lets mad_resolve_address read it lock-free */
     obj_handle_t *samplers;      /* held for the process's life; see CreateSampler */
     unsigned nsamplers, samplers_cap;
+    /* madeira-bcd: guards samplers, srv_res and uav_res. D3D12 device methods
+     * are free-threaded: GoT's streaming threads create samplers and views at
+     * the same time, and two unlocked reallocs of one array corrupted the heap
+     * (pack-4 crash in mad_grow <- mad_note_sampler, ntdll heap AV). */
+    SRWLOCK list_lock;
     /* Textures that have had a shader resource view created. A descriptor heap
      * stores resource IDs, not resource pointers, so the encoder cannot recover
      * from a bound table which textures it names. Declaring residency for all
@@ -614,12 +619,15 @@ static void mad_acct_report(void) {
               "between pipelines)\n", g_lib_count, (long long)(g_lib_bytes >> 20));
 }
 static void mad_note_sampler(struct mad_device *d, obj_handle_t smp) {
+    int kept = 0;
     if (!d || !smp) return;
-    if (mad_grow((void **)&d->samplers, &d->samplers_cap, d->nsamplers + 1, sizeof *d->samplers))
-        d->samplers[d->nsamplers++] = smp;
-    else NSObject_release(smp);
+    AcquireSRWLockExclusive(&d->list_lock);
+    if (mad_grow((void **)&d->samplers, &d->samplers_cap, d->nsamplers + 1, sizeof *d->samplers)) {
+        d->samplers[d->nsamplers++] = smp; kept = 1;
+    }
+    ReleaseSRWLockExclusive(&d->list_lock);
+    if (!kept) NSObject_release(smp);
 }
-
 /* ---- resources ----------------------------------------------------------
  * Buffers only for now. The CPU-visible heaps get storage allocated here and
  * handed to the backend as the buffer's memory, which is the same arrangement
@@ -660,6 +668,7 @@ struct mad_resource {
     struct mad_tview { UINT fmt; UINT64 off, num; UINT8 uav; obj_handle_t tex; UINT64 id; } *tview;
     unsigned ntview, tview_cap;
     void *view_old[24]; unsigned nview_old;   /* outgrown arrays, freed with the resource */
+    unsigned srv_slot, uav_slot;              /* madeira-bcd: index+1 in the device's srv_res / uav_res, 0 = absent (list_lock) */
     UINT64 acct_bytes; unsigned acct_cat;        /* ml1057: live-backing census */
     int hp_used; unsigned hp_heap; UINT64 hp_off, hp_size;   /* ml1072: placed in a runtime texture heap */
     /* ml913: dimension-correct texture views. Metal binds a texture only to a
@@ -672,6 +681,31 @@ struct mad_resource {
     struct mad_xview { UINT type, lvl0, nlvl, sl0, nsl, pf, swz; obj_handle_t tex; UINT64 id; } *xview;
     unsigned nxview, xview_cap;
 };
+/* madeira-bcd: srv_res / uav_res membership, O(1) through the resource's slot
+ * (the old linear scan ran over ~15,000 textures on every view creation). */
+static void mad_view_list_add(struct mad_device *d, int uav, struct mad_resource *r) {
+    struct mad_resource ***arr = uav ? &d->uav_res : &d->srv_res;
+    unsigned *n = uav ? &d->nuav : &d->nsrv, *cap = uav ? &d->nuav_cap : &d->nsrv_cap;
+    unsigned *slot = uav ? &r->uav_slot : &r->srv_slot;
+    if (*slot) return;   /* unlocked peek: the common case, already listed */
+    AcquireSRWLockExclusive(&d->list_lock);
+    if (!*slot && mad_grow((void **)arr, cap, *n + 1, sizeof **arr)) {
+        (*arr)[*n] = r; *slot = ++*n;
+    }
+    ReleaseSRWLockExclusive(&d->list_lock);
+}
+static void mad_view_list_del(struct mad_device *d, int uav, struct mad_resource *r) {
+    struct mad_resource **arr = uav ? d->uav_res : d->srv_res;
+    unsigned *n = uav ? &d->nuav : &d->nsrv;
+    unsigned *slot = uav ? &r->uav_slot : &r->srv_slot;
+    unsigned i = *slot - 1;
+    struct mad_resource *last = arr[--*n];
+    arr[i] = last;
+    if (uav) last->uav_slot = i + 1; else last->srv_slot = i + 1;
+    *slot = 0;
+}
+
+
 
 DEFINE_GUID(IID_IMTLDXGIDevice, 0x6bfa1657, 0x9cb1, 0x471a, 0xa4, 0xfb, 0x7c, 0xac, 0xf8, 0xa8, 0x12, 0x07);
 
@@ -3634,18 +3668,21 @@ static struct mad_resource *mad_texture_of_view(struct mad_device *d, UINT64 id,
      * ever had an SRV or UAV is in srv_res / uav_res, which is what a table
      * entry can name. */
     unsigned i, k, pass;
+    struct mad_resource *found = NULL;
     *xv = -1;
     if (!id) return NULL;
-    for (pass = 0; pass < 2; pass++) {
+    AcquireSRWLockShared(&d->list_lock);
+    for (pass = 0; pass < 2 && !found; pass++) {
         struct mad_resource **list = pass ? d->uav_res : d->srv_res; unsigned n = pass ? d->nuav : d->nsrv;
-        for (i = 0; i < n; i++) {
+        for (i = 0; i < n && !found; i++) {
             struct mad_resource *r = list[i];
             if (!r || !r->texture) continue;
-            if (r->gpu_resource_id == id) return r;
-            for (k = 0; k < r->nxview; k++) if (r->xview[k].id == id) { *xv = (int)k; return r; }
+            if (r->gpu_resource_id == id) { found = r; break; }
+            for (k = 0; k < r->nxview; k++) if (r->xview[k].id == id) { *xv = (int)k; found = r; break; }
         }
     }
-    return NULL;
+    ReleaseSRWLockShared(&d->list_lock);
+    return found;
 }
 /* ---------------------------------------------------------------------------
  * ml1008: the DXBC/SM5.x binding bridge.
@@ -4897,13 +4934,17 @@ tess_go:
      * samples, 26,000 draws per 600 lists). Skip them exactly when they are
      * meaningless; small applications keep the old behaviour. */
     const int ml1060_skip_lists = dev->resset && dev->nsrv > 256;
-    for (i = 0; !ml1060_skip_lists && i < dev->nsrv && nur < 256; i++) {
-        struct mad_resource *r = dev->srv_res[i];
-        if (r) MAD_USE(r->texture ? r->texture : r->buffer);
-    }
-    for (i = 0; !ml1060_skip_lists && i < dev->nuav && nur < 256; i++) {
-        struct mad_resource *r = dev->uav_res[i];
-        if (r) MAD_USE_U(r->texture ? r->texture : r->buffer, WMTResourceUsageRead | WMTResourceUsageWrite);
+    if (!ml1060_skip_lists) {
+        AcquireSRWLockShared(&dev->list_lock);   /* madeira-bcd: views are created on other threads */
+        for (i = 0; i < dev->nsrv && nur < 256; i++) {
+            struct mad_resource *r = dev->srv_res[i];
+            if (r) MAD_USE(r->texture ? r->texture : r->buffer);
+        }
+        for (i = 0; i < dev->nuav && nur < 256; i++) {
+            struct mad_resource *r = dev->uav_res[i];
+            if (r) MAD_USE_U(r->texture ? r->texture : r->buffer, WMTResourceUsageRead | WMTResourceUsageWrite);
+        }
+        ReleaseSRWLockShared(&dev->list_lock);
     }
     if (dev->nsrv > 190 && !said_trunc++)
         d3d12_log("[madeira-d3d12] residency list truncated at 256 per draw (%u views); a real residency set is owed\n", dev->nsrv);
@@ -5511,8 +5552,10 @@ static void exec_dispatch(struct mad_exec *e, const struct mad_cmd *c) {
         if (r) MAD_CUSE(r->texture ? r->texture : r->buffer, (enum WMTResourceUsage)(WMTResourceUsageRead | WMTResourceUsageWrite));
     }
     const int ml1060_cskip = dev->resset && dev->nsrv > 256;   /* same reasoning as exec_draw */
+    if (!ml1060_cskip) AcquireSRWLockShared(&dev->list_lock);   /* madeira-bcd */
     for (i = 0; !ml1060_cskip && i < dev->nsrv && nur < 256; i++) { struct mad_resource *r = dev->srv_res[i]; if (r) MAD_CUSE(r->texture ? r->texture : r->buffer, WMTResourceUsageRead); }
     for (i = 0; !ml1060_cskip && i < dev->nuav && nur < 256; i++) { struct mad_resource *r = dev->uav_res[i]; if (r) MAD_CUSE(r->texture ? r->texture : r->buffer, (enum WMTResourceUsage)(WMTResourceUsageRead | WMTResourceUsageWrite)); }
+    if (!ml1060_cskip) ReleaseSRWLockShared(&dev->list_lock);
     InterlockedExchangeAdd(&g_es_use_n, (LONG)nur);   /* madeira-bcd: encode split */
 #undef MAD_CUSE
     if (c->kind == MC_DISPATCH_INDIRECT) {
@@ -7475,13 +7518,7 @@ static void STDMETHODCALLTYPE device_CreateUnorderedAccessView(ID3D12Device *Thi
         }
         return;
     }
-    {
-        struct mad_device *dev = (struct mad_device *)This;
-        unsigned k;
-        for (k = 0; k < dev->nuav; k++) if (dev->uav_res[k] == r) break;
-        if (k == dev->nuav && mad_grow((void **)&dev->uav_res, &dev->nuav_cap, dev->nuav + 1, sizeof *dev->uav_res))
-            dev->uav_res[dev->nuav++] = r;
-    }
+    mad_view_list_add((struct mad_device *)This, 1, r);
     if (r->texture) {
         UINT64 view_id = r->gpu_resource_id;
         UINT clr_level = 0, clr_sl0 = 0, clr_nsl = ~0u;   /* madeira-bcd: for texture UAV clears */
@@ -8011,9 +8048,13 @@ static ULONG STDMETHODCALLTYPE res_Release(ID3D12Resource *This) {
         if (r->owner) {   /* ml920: srv_res / uav_res kept freed resources; the residency
                            * loops read r->texture from them, and a longer walk
                            * (ml918 capture) faulted on a partially unmapped one. */
-            struct mad_device *dd = r->owner; unsigned i;
-            for (i = 0; i < dd->nsrv; i++) if (dd->srv_res[i] == r) { dd->srv_res[i] = dd->srv_res[--dd->nsrv]; break; }
-            for (i = 0; i < dd->nuav; i++) if (dd->uav_res[i] == r) { dd->uav_res[i] = dd->uav_res[--dd->nuav]; break; }
+            struct mad_device *dd = r->owner;
+            if (r->srv_slot || r->uav_slot) {
+                AcquireSRWLockExclusive(&dd->list_lock);
+                if (r->srv_slot) mad_view_list_del(dd, 0, r);
+                if (r->uav_slot) mad_view_list_del(dd, 1, r);
+                ReleaseSRWLockExclusive(&dd->list_lock);
+            }
         }
         if (r->owner) {   /* ml1049: forget the ids before the views die */
             struct mad_device *vd = (struct mad_device *)r->owner; unsigned k;
@@ -9321,10 +9362,7 @@ static void STDMETHODCALLTYPE device_CreateShaderResourceView(ID3D12Device *This
     e->texture_view_id = view_id;
     e->metadata = (UINT64)lod_bits;
 
-    struct mad_device *dev = (struct mad_device *)This;
-    for (unsigned i = 0; i < dev->nsrv; i++) if (dev->srv_res[i] == r) return;
-    if (mad_grow((void **)&dev->srv_res, &dev->nsrv_cap, dev->nsrv + 1, sizeof *dev->srv_res))
-        dev->srv_res[dev->nsrv++] = r;
+    mad_view_list_add((struct mad_device *)This, 0, r);
 }
 
 /* ml923: the full D3D12 sampler description -> Metal. D3D12_FILTER packs
@@ -12861,6 +12899,7 @@ __declspec(dllexport) HRESULT WINAPI MadeiraD3D12CreateDevice(IUnknown *adapter,
     }
     if (devices) NSObject_release(devices);
     InitializeCriticalSection(&d->live_lock);
+    InitializeSRWLock(&d->list_lock);           /* madeira-bcd */
     InitializeCriticalSection(&d->view_lock);   /* ml1049 */
     InitializeCriticalSection(&d->ring_lock);   /* ml1061 */
     InitializeCriticalSection(&d->vis_lock);    /* ml1088 */
