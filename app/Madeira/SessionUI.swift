@@ -159,9 +159,10 @@ struct SessionPanelView: View {
                 }
 
                 Section {
-                    Picker("Mode", selection: $input.relative) {
-                        Text("Absolute").tag(false)
-                        Text("Relative").tag(true)
+                    Picker("Mode", selection: $input.mode) {
+                        Text("Trackpad").tag(InputSettings.PointerMode.trackpad)
+                        Text("Touch").tag(InputSettings.PointerMode.touch)
+                        Text("Relative").tag(InputSettings.PointerMode.relative)
                     }
                     .pickerStyle(.segmented)
                     sensitivityRow("Touch sensitivity", value: $input.sensAbs)
@@ -169,9 +170,11 @@ struct SessionPanelView: View {
                 } header: {
                     Text("Mouse & pointer")
                 } footer: {
-                    Text(input.relative
-                         ? "Relative: drag moves the pointer like a trackpad; games that capture the mouse get motion."
-                         : "Absolute: the pointer goes where you touch.")
+                    Text(input.mode == .relative
+                         ? "Relative: dragging turns the camera (mouse motion, no clicks); use on-screen buttons to click."
+                         : input.mode == .touch
+                         ? "Touch: the pointer jumps to your finger and a touch clicks there."
+                         : "Trackpad: drag moves the pointer, tap clicks, hold then drag drags, two fingers scroll or right-click.")
                 }
 
                 Section {

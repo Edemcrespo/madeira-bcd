@@ -257,6 +257,19 @@ final class MetalBackedView: UIView {
         guard let v = getenv("MADEIRA_DESKTOP") else { return false }
         return v.pointee == 49  // '1'
     }
+    /// The trackpad handling below also drives a direct launch unless the
+    /// player picked Touch (pointer jumps to the finger).
+    private var trackpadMode: Bool { desktopMode || !InputSettings.shared.directTouch }
+    /// Largest guest pixel the pointer may reach. A direct launch follows the
+    /// game's live display mode; the desktop keeps its session size.
+    private func pointerMax() -> CGPoint {
+        if desktopMode {
+            return CGPoint(x: envInt("MADEIRA_SCREEN_W", 1024) - 1, y: envInt("MADEIRA_SCREEN_H", 768) - 1)
+        }
+        var w: Int32 = 0, h: Int32 = 0
+        winios_screen_size(&w, &h)
+        return CGPoint(x: Int(w > 0 ? w : 1024) - 1, y: Int(h > 0 ? h : 768) - 1)
+    }
     private func envInt(_ name: String, _ def: Int) -> Int {
         guard let v = getenv(name), let i = Int(String(cString: v)) else { return def }
         return i
@@ -275,7 +288,7 @@ final class MetalBackedView: UIView {
     }
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
-        guard desktopMode else {
+        guard trackpadMode else {
             guard let t = touches.first else { return }
             let (x, y) = mapTouch(t)
             winios_post_touch_down(x, y)
@@ -294,6 +307,12 @@ final class MetalBackedView: UIView {
             return
         }
         guard let t = touches.first else { return }
+        // A direct launch's pointer can move without us (the drawn cursor is
+        // seeded at the centre when a window appears), so start from it.
+        if !desktopMode {
+            var cx: Int32 = 0, cy: Int32 = 0
+            if winios_get_cursor_position(&cx, &cy) != 0 { Self.cursor = CGPoint(x: Int(cx), y: Int(cy)) }
+        }
         let p = t.location(in: self)
         touchStartPoint = p
         lastPanPoint = p
@@ -319,7 +338,7 @@ final class MetalBackedView: UIView {
     }
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
-        guard desktopMode else {
+        guard trackpadMode else {
             guard let t = touches.first else { return }
             let (x, y) = mapTouch(t)
             winios_post_touch_move(x, y)
@@ -387,15 +406,14 @@ final class MetalBackedView: UIView {
         }
 
         let sens = CGFloat(InputSettings.shared.sensAbs)   // desktop px per view pt
-        let maxX = CGFloat(envInt("MADEIRA_SCREEN_W", 1024) - 1)
-        let maxY = CGFloat(envInt("MADEIRA_SCREEN_H", 768) - 1)
-        Self.cursor.x = min(max(Self.cursor.x + dx * sens, 0), maxX)
-        Self.cursor.y = min(max(Self.cursor.y + dy * sens, 0), maxY)
+        let lim = pointerMax()
+        Self.cursor.x = min(max(Self.cursor.x + dx * sens, 0), lim.x)
+        Self.cursor.y = min(max(Self.cursor.y + dy * sens, 0), lim.y)
         postPointer(F_MOVE | F_ABS)
     }
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
-        guard desktopMode else {
+        guard trackpadMode else {
             guard let t = touches.first else { return }
             let (x, y) = mapTouch(t)
             winios_post_touch_up(x, y)
@@ -436,7 +454,7 @@ final class MetalBackedView: UIView {
     }
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
-        guard desktopMode else {
+        guard trackpadMode else {
             guard let t = touches.first else { return }
             let (x, y) = mapTouch(t)
             winios_post_touch_up(x, y)
@@ -834,6 +852,16 @@ final class InputSettings: ObservableObject {
     static let shared = InputSettings()
 
     @Published var relative: Bool  = false { didSet { save() } }
+    /// Direct launch only: the pointer jumps to the finger and a touch is a
+    /// click there (the behaviour before trackpad mode reached direct launches).
+    @Published var directTouch: Bool = false { didSet { save() } }
+
+    enum PointerMode: Int, CaseIterable { case trackpad, touch, relative }
+    /// The one choice the pointer pickers show; stored as the two flags above.
+    var mode: PointerMode {
+        get { relative ? .relative : (directTouch ? .touch : .trackpad) }
+        set { relative = newValue == .relative; directTouch = newValue == .touch }
+    }
     @Published var sensAbs:  Double = 2.0  { didSet { save() } }
     @Published var sensRel:  Double = 2.0  { didSet { save() } }
     /// ml649: heavy diagnostics. Default OFF so the shipped default is the fast
@@ -855,6 +883,7 @@ final class InputSettings: ObservableObject {
         if let d = try? Data(contentsOf: Self.url),
            let j = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any] {
             relative = j["relative"] as? Bool   ?? false
+            directTouch = j["directTouch"] as? Bool ?? false
             sensAbs  = j["sensAbs"]  as? Double ?? 2.0
             sensRel  = j["sensRel"]  as? Double ?? 2.0
             diagnostics = j["diagnostics"] as? Bool ?? false
@@ -865,7 +894,7 @@ final class InputSettings: ObservableObject {
 
     private func save() {
         guard !loading else { return }
-        let j: [String: Any] = ["relative": relative, "sensAbs": sensAbs, "sensRel": sensRel, "diagnostics": diagnostics]
+        let j: [String: Any] = ["relative": relative, "directTouch": directTouch, "sensAbs": sensAbs, "sensRel": sensRel, "diagnostics": diagnostics]
         guard let d = try? JSONSerialization.data(withJSONObject: j) else { return }
         try? d.write(to: Self.url, options: .atomic)
     }
@@ -1190,10 +1219,10 @@ struct ContentView: View {
 
     private var pointerModeToggle: some View {
         Button {
-            input.relative.toggle()
+            input.mode = InputSettings.PointerMode(rawValue: (input.mode.rawValue + 1) % 3) ?? .trackpad
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
         } label: {
-            Text(input.relative ? "Relative" : "Absolute")
+            Text(input.mode == .relative ? "Relative" : input.mode == .touch ? "Touch" : "Trackpad")
                 .font(.system(size: 13, weight: .semibold))
                 .frame(minWidth: 82, minHeight: 32)
                 .background((input.relative ? Color.accentColor : Color.secondary).opacity(0.28))

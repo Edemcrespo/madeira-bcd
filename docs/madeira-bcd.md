@@ -453,6 +453,14 @@ already did.
   Upstream's Swift side of the direct-launch GDI overlay was never merged, so
   a directly launched game's plain GDI windows (Ghost of Tsushima's launcher,
   message boxes, choosers) had no host layer and stayed dark.
+- Pointer modes (Session panel, portrait bar): **Trackpad** (default; drag
+  moves the pointer, tap clicks, hold then drag drags, two fingers scroll or
+  right-click), **Touch** (the pointer jumps to the finger, a touch clicks
+  there) and **Relative** (mouse-look motion, no clicks). A direct launch used
+  to ignore the setting and always behave like Touch; it now uses the same
+  trackpad handling as the Windows desktop, clamped to the game's live display
+  mode and starting from the drawn cursor. Stored in
+  `Documents/madeira-input.json` (`directTouch`).
 - `GameControllerManager.swift`: physical controllers mapped to keyboard and
   mouse (ported from SaimSuhailQu/Madeira 72ca339). Since upstream #22 hands
   pads to games as real XInput controllers (`GamepadInput.swift`), this
