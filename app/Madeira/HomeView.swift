@@ -53,6 +53,9 @@ struct LaunchRequest {
     /// Direct launch only: the virtual monitor's default size (its mode list
     /// stops at this many pixels). nil = 1024x768.
     var screen: (w: Int, h: Int)?
+    /// The game's own settings file (GameProfiles.swift), exported as
+    /// MADEIRA_CFG_GAME when it sets anything.
+    var profile: GameProfile?
     private static var forcedFastsyncOff = false
 
     func apply() {
@@ -78,16 +81,33 @@ struct LaunchRequest {
         }
         if avx { setenv("MADEIRA_FEX_AVX", "1", 1) } else { unsetenv("MADEIRA_FEX_AVX") }
         if wineVCRT { setenv("MADEIRA_WINE_VCRT", "1", 1) } else { unsetenv("MADEIRA_WINE_VCRT") }
+        var dxmtExtra: [String] = []
         if nvidia {
             setenv("DXMT_ENABLE_NVEXT", "1", 1)
             // The same GeForce RTX 3060 (10DE:2544) win32u registers as the
             // display adapter (sysparams_ios.c, ios_virtual_gpu_ids); merged
             // into DXMT_CONFIG by ContentView.
-            setenv("MADEIRA_DXMT_EXTRA", "dxgi.customDeviceId=2544", 1)
+            dxmtExtra.append("dxgi.customDeviceId=2544")
         } else {
             unsetenv("DXMT_ENABLE_NVEXT")
-            unsetenv("MADEIRA_DXMT_EXTRA")
         }
+        // madeira-bcd: the game's own settings (GameProfiles.swift).
+        if let p = profile, p.hasSettings, let u = p.url {
+            setenv("MADEIRA_CFG_GAME", u.path, 1)
+        } else {
+            unsetenv("MADEIRA_CFG_GAME")
+        }
+        // MetalFX: the D3D12 runtime reads metalfx-upscale from that file; a
+        // D3D11 game gets DXMT's own MetalFX swapchain at the same factor.
+        if let f = profile?.metalFXFactor {
+            setenv("DXMT_METALFX_SPATIAL_SWAPCHAIN", "1", 1)
+            dxmtExtra.append("d3d11.metalSpatialUpscaleFactor=\(f)")
+        } else {
+            unsetenv("DXMT_METALFX_SPATIAL_SWAPCHAIN")
+        }
+        if dxmtExtra.isEmpty { unsetenv("MADEIRA_DXMT_EXTRA") }
+        else { setenv("MADEIRA_DXMT_EXTRA", dxmtExtra.joined(separator: "\n"), 1) }
+        if let limit = profile?.frameLimit { FrameLimit.apply(limit) }
         // Only forced off here; when the switch is off, madeira.cfg's own
         // env.MADEIRA_FASTSYNC (exported above) still decides.
         if safeSync {
@@ -148,9 +168,11 @@ enum ExperimentalSettings {
     }
 
     /// Must run before runWineFullSequence. Everything here is read from
-    /// madeira.cfg by the native side, so there is nothing to export today;
-    /// kept as the one place a future environment-only switch would go.
-    static func exportToEnvironment() {}
+    /// madeira.cfg by the native side; what is exported is the update pack
+    /// (UpdatePacks.swift) and the shader cache identity its DLL needs.
+    static func exportToEnvironment() {
+        UpdatePacks.exportEnvironment()
+    }
 }
 
 // MARK: - Root
@@ -398,6 +420,7 @@ struct HomeView: View {
 
     @Environment(\.scenePhase) private var scenePhase
     @ObservedObject private var controllers = GameControllerManager.shared
+    @ObservedObject private var packs = UpdatePacks.shared
     @AppStorage("wine_desktop_res") private var desktopRes = "960x540"
 
     @State private var games: [LibraryGame] = []
@@ -442,6 +465,7 @@ struct HomeView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 22) {
                     statusRow
+                    UpdateBanner()
                     if !jitOn { jitBanner }
                     if search.isEmpty, let g = recent { continueCard(g) }
                     desktopCard
@@ -466,7 +490,12 @@ struct HomeView: View {
                     Button { showSettings = true } label: { Image(systemName: "gearshape") }
                 }
             }
-            .onAppear { if !scannedOnce { rescan() } }
+            .onAppear {
+                if !scannedOnce {
+                    rescan()
+                    UpdatePacks.shared.refresh(silent: true)
+                }
+            }
             .onChange(of: scenePhase) { _, phase in
                 // StikDebug enables JIT from outside the app, so re-read the
                 // flag whenever we come back to the foreground.
@@ -502,6 +531,9 @@ struct HomeView: View {
                            text: controllers.activeControllerName ?? "Controller", tint: .green)
             }
             StatusChip(icon: "square.stack.3d.up.fill", text: "\(games.count) games", tint: .blue)
+            if packs.installedUsable, let p = packs.installed {
+                StatusChip(icon: "shippingbox.fill", text: "Pack \(p.build)", tint: .teal)
+            }
             Spacer()
         }
         }
@@ -731,6 +763,7 @@ struct HomeView: View {
             let s = LibraryPrefs.screenPixels(screen)
             request.screen = (w: s.0, h: s.1)
         }
+        request.profile = GameProfile(windowsPath: exe.windowsPath)
         LibraryPrefs.markPlayed(game.title)
         start(request)
     }
@@ -918,6 +951,9 @@ struct GameSettingsSheet: View {
     @State private var nvidia: Bool
     @State private var safeSync: Bool
     @State private var screen: String
+    @State private var metalFX: String
+    @State private var fpsLimit: String
+    @State private var tess: String
     @State private var photo: PhotosPickerItem?
     @State private var tick = 0
 
@@ -935,6 +971,30 @@ struct GameSettingsSheet: View {
         _nvidia = State(initialValue: LibraryPrefs.nvidia(exe.windowsPath))
         _safeSync = State(initialValue: LibraryPrefs.safeSync(exe.windowsPath))
         _screen = State(initialValue: LibraryPrefs.screen(exe.windowsPath))
+        let profile = GameProfile(windowsPath: exe.windowsPath)
+        _metalFX = State(initialValue: profile.get("metalfx-upscale") ?? "")
+        _fpsLimit = State(initialValue: profile.get("fps-limit") ?? "")
+        _tess = State(initialValue: profile.get("dxil-tess-max-factor") ?? "")
+    }
+
+    private var profile: GameProfile { GameProfile(windowsPath: exePath) }
+
+    private func loadProfile() {
+        metalFX = profile.get("metalfx-upscale") ?? ""
+        fpsLimit = profile.get("fps-limit") ?? ""
+        tess = profile.get("dxil-tess-max-factor") ?? ""
+    }
+
+    /// A picker over (value, label) pairs that also shows a value typed into the raw file.
+    private func choicePicker(_ title: String, _ selection: Binding<String>, _ choices: [(String, String)]) -> some View {
+        let known = choices.contains { $0.0 == selection.wrappedValue }
+        let extra: [(String, String)] = known ? [] : [(selection.wrappedValue, selection.wrappedValue)]
+        let all: [(String, String)] = choices + extra
+        return Picker(title, selection: selection) {
+            ForEach(Array(all.enumerated()), id: \.offset) { item in
+                Text(item.element.1).tag(item.element.0)
+            }
+        }
     }
 
     /// What the exe will get: the typed arguments, else the suggestion.
@@ -1054,6 +1114,26 @@ struct GameSettingsSheet: View {
                 }
 
                 Section {
+                    choicePicker("MetalFX upscaling", $metalFX, GameProfile.metalFXChoices)
+                    choicePicker("FPS limit at start", $fpsLimit, GameProfile.fpsChoices)
+                    choicePicker("Tessellation detail (D3D12)", $tess, GameProfile.tessChoices)
+                    NavigationLink {
+                        GameConfigEditor(profile: profile, onSave: { loadProfile() })
+                    } label: {
+                        Label("Advanced: this game's config", systemImage: "doc.text")
+                    }
+                } header: {
+                    Text("Graphics & performance")
+                } footer: {
+                    Text("MetalFX upscaling renders at the screen size above and sharpens the picture up to 1.5× "
+                         + "or 2× with Apple's scaler, so a small screen size (960x540, 1280x720) for frame rate "
+                         + "still looks crisp. FPS limit at start is the cap the session opens with; 30 or 40 "
+                         + "keeps the frame rate even when the phone warms up. Tessellation detail caps the D3D12 "
+                         + "runtime's low-detail tessellation (particles, grass); Full costs GPU time. The "
+                         + "advanced file takes any madeira.cfg key or env.NAME line for this game only.")
+                }
+
+                Section {
                     CoverArt(title: game.title, tick: tick)
                         .frame(height: 200)
                         .listRowInsets(EdgeInsets())
@@ -1102,6 +1182,7 @@ struct GameSettingsSheet: View {
                 nvidia = LibraryPrefs.nvidia(newPath)
                 safeSync = LibraryPrefs.safeSync(newPath)
                 screen = LibraryPrefs.screen(newPath)
+                loadProfile()
             }
             .onChange(of: photo) { _, item in
                 guard let item else { return }
@@ -1128,6 +1209,10 @@ struct GameSettingsSheet: View {
         LibraryPrefs.setNvidia(nvidia, for: exePath)
         LibraryPrefs.setSafeSync(safeSync, for: exePath)
         LibraryPrefs.setScreen(screen, for: exePath)
+        let p = profile
+        if p.get("metalfx-upscale") ?? "" != metalFX { p.set("metalfx-upscale", metalFX) }
+        if p.get("fps-limit") ?? "" != fpsLimit { p.set("fps-limit", fpsLimit) }
+        if p.get("dxil-tess-max-factor") ?? "" != tess { p.set("dxil-tess-max-factor", tess) }
     }
 }
 
@@ -1155,6 +1240,8 @@ struct AppSettingsSheet: View {
                         Label("Game controllers", systemImage: "gamecontroller")
                     }
                 }
+
+                UpdatesSection()
 
                 Section {
                     Button { FilesApp.openDriveC() } label: {

@@ -595,6 +595,38 @@ static uint16_t madeira_pe_machine(const char *unix_path) {
     return machine;
 }
 
+/***********************************************************************
+ *           madeira_pe_source
+ *
+ * madeira-bcd update packs (UpdatePacks.swift, docs/madeira-bcd.md): the file
+ * a farm link for `name` should point at -- the installed pack's copy when it
+ * has one for this arch, else the bundle's. On iOS the loader maps the PE file
+ * the system32 link resolves to (loader_ios.c, load_builtin), so this is the
+ * whole overlay. The app sets MADEIRA_PACK_DIR only for a pack it verified
+ * (file hashes) and whose native ABI equals this build's; nothing else here
+ * trusts the directory.
+ */
+static int g_pack_overlaid;
+static NSString *madeira_pe_source(NSString *archSource, const char *arch, NSString *name) {
+    static NSString *packDir;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        const char *p = getenv("MADEIRA_PACK_DIR");
+        if (p && *p) packDir = [NSString stringWithUTF8String:p];
+    });
+    if (packDir) {
+        NSString *cand = [[packDir stringByAppendingPathComponent:[NSString stringWithUTF8String:arch]]
+                          stringByAppendingPathComponent:name];
+        if ([[NSFileManager defaultManager] fileExistsAtPath:cand]) {
+            if (g_pack_overlaid++ < 16)
+                dprintf(STDERR_FILENO, "[pack] %s/%s from the update pack (%s)\n", arch, name.UTF8String,
+                        getenv("MADEIRA_PACK_ID") ?: "?");
+            return cand;
+        }
+    }
+    return [archSource stringByAppendingPathComponent:name];
+}
+
 #define MADEIRA_IMAGE_FILE_MACHINE_I386  0x14c
 #define MADEIRA_IMAGE_FILE_MACHINE_AMD64 0x8664
 #define MADEIRA_IMAGE_FILE_MACHINE_ARM64 0xaa64
@@ -889,6 +921,23 @@ static void *wine_process_thread(void *arg) {
                     LOG("madeira.cfg env: %{public}s=%{public}s", k.UTF8String, v.UTF8String);
                     fprintf(stderr, "[madeira-env] ml1062 %s=%s\n", k.UTF8String, v.UTF8String);
                 }
+                /* madeira-bcd: the game's own settings file (GameProfiles.swift,
+                 * $MADEIRA_CFG_GAME) -- its env.NAME lines come last and win, the
+                 * same rule madeira_cfg_get applies to its keys. */
+                const char *gameCfg = getenv("MADEIRA_CFG_GAME");
+                NSString *gtext = (gameCfg && *gameCfg)
+                    ? [NSString stringWithContentsOfFile:[NSString stringWithUTF8String:gameCfg] encoding:NSUTF8StringEncoding error:nil]
+                    : nil;
+                for (NSString *raw in [gtext componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]]) {
+                    NSString *line = [raw stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+                    NSRange eq = [line rangeOfString:@"="];
+                    if (![line hasPrefix:@"env."] || eq.location == NSNotFound) continue;
+                    NSString *k = [[line substringWithRange:NSMakeRange(4, eq.location - 4)] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+                    NSString *v = [[line substringFromIndex:eq.location + 1] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+                    if (!k.length) continue;
+                    setenv(k.UTF8String, v.UTF8String, 1);
+                    fprintf(stderr, "[madeira-env] game %s=%s\n", k.UTF8String, v.UTF8String);
+                }
             }
         }
 
@@ -1050,7 +1099,7 @@ static void *wine_process_thread(void *arg) {
             NSArray *dlls = [fm contentsOfDirectoryAtPath:dllSource error:nil];
             int linked = 0;
             for (NSString *dll in dlls) {
-                NSString *src = [dllSource stringByAppendingPathComponent:dll];
+                NSString *src = madeira_pe_source(dllSource, bundle_subdir, dll);
                 NSString *dst = [sys32Dir stringByAppendingPathComponent:dll];
                 // Remove stale symlinks and re-create (bundle path changes on reinstall)
                 [fm removeItemAtPath:dst error:nil];
@@ -1085,7 +1134,7 @@ static void *wine_process_thread(void *arg) {
                     // from Wine's dir enumeration. Clear then recreate, like
                     // the main pass does.
                     [fm removeItemAtPath:dst error:nil];
-                    NSString *src = [otherSource stringByAppendingPathComponent:f];
+                    NSString *src = madeira_pe_source(otherSource, other_subdir, f);
                     if ([fm createSymbolicLinkAtPath:dst withDestinationPath:src error:nil])
                         crossLinked++;
                 }
@@ -1122,7 +1171,7 @@ static void *wine_process_thread(void *arg) {
                     for (NSString *f in files) {
                         NSString *dst = [farmDir stringByAppendingPathComponent:f];
                         [fm removeItemAtPath:dst error:nil];  // self-heal stale links on reinstall
-                        NSString *src = [archSource stringByAppendingPathComponent:f];
+                        NSString *src = madeira_pe_source(archSource, farms[i].arch, f);
                         if ([fm createSymbolicLinkAtPath:dst withDestinationPath:src error:nil])
                             farmLinked++;
                     }

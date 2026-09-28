@@ -861,6 +861,8 @@ jobs:
       # DLL -- upstream's old binary without any of this fork's D3D12 fixes --
       # and the run still went green, so a broken build could reach the phone.
       - name: Build madeira_d3d12.dll from source
+        env:
+          MAD_PACK_ID: ipa ${{ github.run_number }}
         run: bash tools/build-madeira-d3d12-dll.sh
 
       # DXMT's NVAPI (research/dxmt/src/nvapi), which its DXMT build leaves
@@ -1116,6 +1118,20 @@ jobs:
             -c "Set :CFBundleVersion ${{ github.run_number }}" \
             app/Madeira/Info.plist
           echo "::notice::version 0.1.${{ github.run_number }} (build ${{ github.run_number }})"
+          # madeira-bcd update packs: what a pack must match to be installed
+          # over this app (tools/native-abi.sh), the shader cache identity its
+          # DLL should use, and where to look for packs.
+          ABI=$(bash tools/native-abi.sh)
+          SCID=$(cat build/madeira-d3d12/out-pe/scid.txt 2>/dev/null || true)
+          P=app/Madeira/Info.plist
+          for kv in "MadeiraNativeABI:$ABI" "MadeiraShaderCacheID:$SCID" \
+                    "MadeiraCommit:${GITHUB_SHA}" "MadeiraRepo:${GITHUB_REPOSITORY}" \
+                    "MadeiraBuilt:$(date -u +%Y-%m-%dT%H:%M:%SZ)"; do
+            k=${kv%%:*}; v=${kv#*:}
+            /usr/libexec/PlistBuddy -c "Delete :$k" "$P" > /dev/null 2>&1 || true
+            /usr/libexec/PlistBuddy -c "Add :$k string $v" "$P"
+          done
+          echo "::notice::native ABI $ABI, shader cache identity ${SCID:-none}"
 
       - name: Archive (unsigned)
         shell: bash
@@ -1206,6 +1222,17 @@ jobs:
           mkdir -p build-out/Payload
           cp -R build-out/Madeira.xcarchive/Products/Applications/Madeira.app build-out/Payload/
           cd build-out && ditto -c -k --keepParent Payload Madeira-0.1.${{ github.run_number }}-unsigned.ipa
+
+      # Update packs (tools/pack-index.py): record this build's native ABI in
+      # the packs index -- metadata only, the IPA itself is not published --
+      # so the app can tell which build a newer pack needs.
+      - name: Record the app build in the update-pack index
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 tools/pack-index.py add-app ${{ github.run_number }} "$(bash tools/native-abi.sh)" \
+            "$GITHUB_SHA" "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
 
       - uses: actions/upload-artifact@v4
         if: always()

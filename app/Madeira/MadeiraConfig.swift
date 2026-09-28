@@ -49,6 +49,14 @@ enum MadeiraConfig {
         return out
     }
 
+    /// madeira-bcd: `key` from the running game's own file ($MADEIRA_CFG_GAME,
+    /// GameProfiles.swift), or nil. The native reader lets it win over
+    /// madeira.cfg; Swift callers that merge (dxmt) read both.
+    static func gameValue(_ key: String) -> String? {
+        guard let p = getenv("MADEIRA_CFG_GAME"), case let path = String(cString: p), !path.isEmpty else { return nil }
+        return GameProfile.values(ofFile: URL(fileURLWithPath: path))[key].flatMap { $0.isEmpty ? nil : $0 }
+    }
+
     /// The value for `key`, trimmed, or nil when unset. Falls back to the legacy
     /// file ONLY when madeira.cfg does not exist.
     static func get(_ key: String) -> String? {

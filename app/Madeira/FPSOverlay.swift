@@ -113,6 +113,7 @@ struct FPSOverlay: View {
                     Text(String(format: "%.1f", fps))
                         .foregroundColor(fpsColor)
                     pacingPill
+                    thermalPill
                     capturePill
                     ecoPill
                     fencePill
@@ -149,6 +150,7 @@ struct FPSOverlay: View {
                         .foregroundColor(fpsColor)
                         .frame(width: 40, alignment: .trailing)
                     pacingPill
+                    thermalPill
                     capturePill
                     ecoPill
                     fencePill
@@ -188,6 +190,29 @@ struct FPSOverlay: View {
                 madeira_set_vsync_locked(vsyncMode)
                 ProMotionIntent.shared.setActive(FrameLimit.wantsHighRefresh(vsyncMode))
             }
+    }
+
+    /// madeira-bcd: the phone's thermal state. iOS lowers clocks from "serious"
+    /// on, which shows up as a frame rate that sags after a few minutes; with
+    /// this on screen (and in the [present] log line) a drop can be told apart
+    /// from one the game or the runtime caused.
+    @State private var thermal = ProcessInfo.processInfo.thermalState
+    static func thermalName(_ s: ProcessInfo.ThermalState) -> String {
+        switch s {
+        case .nominal: return "OK"
+        case .fair: return "WARM"
+        case .serious: return "HOT"
+        case .critical: return "CRIT"
+        @unknown default: return "?"
+        }
+    }
+    private var thermalPill: some View {
+        let color: Color = thermal == .nominal ? .green : thermal == .fair ? .yellow : thermal == .serious ? .orange : .red
+        return Text(Self.thermalName(thermal))
+            .foregroundColor(color)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 1)
+            .overlay(RoundedRectangle(cornerRadius: 4).stroke(color, lineWidth: 1))
     }
 
     /// ml1098: one tap = capture the next frame (every render pass's attachments
@@ -305,6 +330,11 @@ struct FPSOverlay: View {
             // task_info per 250ms and no additional SwiftUI invalidation.
             memMB = readFootprintMB()
             limitMB = readLimitMB(footprintMB: memMB)
+            let th = ProcessInfo.processInfo.thermalState
+            if th != thermal {
+                LogStore.shared.log("[thermal] \(Self.thermalName(thermal)) -> \(Self.thermalName(th)) at present \(presentCount), fps \(String(format: "%.1f", fps))")
+                thermal = th
+            }
             // The present counter answers "did a frame ever reach the screen",
             // and it only lived on the HUD -- which switches to its compact
             // form (FPS only) exactly when a title starts drawing, so the
@@ -316,7 +346,7 @@ struct FPSOverlay: View {
             if logTicks % 8 == 0 {
                 let c = presentCount
                 if c != lastLoggedPresent || c == 0 {
-                    LogStore.shared.log("[present] count=\(c) fps=\(String(format: "%.1f", fps)) mem=\(memMB)/\(limitMB)MB",
+                    LogStore.shared.log("[present] count=\(c) fps=\(String(format: "%.1f", fps)) mem=\(memMB)/\(limitMB)MB thermal=\(Self.thermalName(thermal))\(ProcessInfo.processInfo.isLowPowerModeEnabled ? " lowpower" : "")",
                                         level: c == 0 ? .debug : .info)
                     lastLoggedPresent = c
                 }

@@ -2333,6 +2333,14 @@ struct ContentView: View {
                         logStore.log("DXMT config: \(v) via madeira.cfg dxmt")
                     }
                 }
+                // madeira-bcd: the game's own file (GameProfiles.swift) adds its dxmt line.
+                if let g = MadeiraConfig.gameValue("dxmt") {
+                    let v = g.replacingOccurrences(of: ";", with: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !v.isEmpty {
+                        parts.append(v)
+                        logStore.log("DXMT config: \(v) via the game's config")
+                    }
+                }
                 // madeira-bcd: per-game options from the library (LaunchRequest).
                 if let c = getenv("MADEIRA_DXMT_EXTRA"), case let extra = String(cString: c), !extra.isEmpty {
                     parts.append(extra)

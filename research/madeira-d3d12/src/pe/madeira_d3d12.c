@@ -36,7 +36,14 @@
 #include "madeira_d3d12_stubs.h"
 #include "madeira_ir_abi.h"
 
+/* madeira-bcd: MAD_PACK_ID names the CI run that built this DLL ("ipa 215" or
+ * "pack 7 (abc1234)"), so a log says which runtime ran -- the IPA's own or one
+ * an update pack installed over it. */
+#ifdef MAD_PACK_ID
+#define MADEIRA_D3D12_BUILD "madeira-d3d12 M2 " MAD_PACK_ID ", " __DATE__ " " __TIME__
+#else
 #define MADEIRA_D3D12_BUILD "madeira-d3d12 M2 " __DATE__ " " __TIME__
+#endif
 
 /* ---- diagnostics ---------------------------------------------------------
  * Routed through OutputDebugStringA so it lands in the same log as everything
@@ -9460,10 +9467,19 @@ static volatile LONG g_sc_hit, g_sc_miss, g_sc_store;
  * without it still gets its own cache per build. The runtime switches that
  * change the converter's output join it in g_sc_rt. */
 #ifdef MAD_SC_CONVERTER_ID
-static const char g_sc_stamp[] = "madeira_d3d12 bc1 converter " MAD_SC_CONVERTER_ID;
+static char g_sc_stamp[96] = "madeira_d3d12 bc1 converter " MAD_SC_CONVERTER_ID;
 #else
-static const char g_sc_stamp[] = "madeira_d3d12 bc1 " __DATE__ " " __TIME__;
+static char g_sc_stamp[96] = "madeira_d3d12 bc1 " __DATE__ " " __TIME__;
 #endif
+/* madeira-bcd: the converter is the app's native half, so its identity is the
+ * app's too. The IPA build stamps it into Info.plist and the app exports it as
+ * MADEIRA_SC_ID; an update pack's DLL (built without the converter at hand)
+ * takes it from there and keeps the device's cache. Fed as strlen + 1 bytes,
+ * exactly what the old const array fed, so existing caches stay valid. */
+static void mad_sc_stamp_init(void) {
+    char v[40]; DWORD n = GetEnvironmentVariableA("MADEIRA_SC_ID", v, sizeof v);
+    if (n && n < sizeof v) snprintf(g_sc_stamp, sizeof g_sc_stamp, "madeira_d3d12 bc1 converter %s", v);
+}
 static char g_sc_rt[96];
 
 struct mad_sc_hash { UINT64 a, b; };
@@ -9492,7 +9508,7 @@ static void mad_sc_feed_blob(struct mad_sc_hash *h, UINT64 p, UINT64 n) {
 static void mad_sc_key(const struct madeira_ir_convert_args *a, UINT64 key[2]) {
     struct mad_sc_hash h = { 0xcbf29ce484222325ull, 0x84222325cbf29ce4ull };
     const struct madeira_ir_input_layout *lay = (const struct madeira_ir_input_layout *)(uintptr_t)a->layout;
-    mad_sc_feed(&h, g_sc_stamp, sizeof g_sc_stamp);
+    mad_sc_feed(&h, g_sc_stamp, strlen(g_sc_stamp) + 1);
     mad_sc_feed(&h, g_sc_rt, sizeof g_sc_rt);
     mad_sc_feed_blob(&h, a->dxil, a->dxil_len);
     mad_sc_feed_str(&h, a->entry_point);
@@ -9572,7 +9588,8 @@ static int mad_sc_init(void) {
                      mad_cfg_int_pe("vsps-fill", 1) ? 1 : 0, nobc, agsrt,
                      mad_cfg_int_pe("msc-position-invariance", 1) ? 1 : 0, mad_cfg_int_pe("msc-strict-nan", 1) ? 1 : 0,
                      mad_cfg_int_pe("msc-sampler-lod-bias", 1) ? 1 : 0);
-            mad_sc_feed(&h, g_sc_stamp, sizeof g_sc_stamp);
+            mad_sc_stamp_init();
+            mad_sc_feed(&h, g_sc_stamp, strlen(g_sc_stamp) + 1);
             mad_sc_feed(&h, g_sc_rt, sizeof g_sc_rt);
             n = GetEnvironmentVariableW(L"LOCALAPPDATA", base, MAX_PATH);
             if (!n || n >= MAX_PATH - 64) on = 0;
@@ -12798,14 +12815,79 @@ struct mad_swapchain {
     UINT max_latency;
     HANDLE latency_event;
     UINT64 present_serial[8];   /* ml1070: GPU serial the frame presented N ago must have passed */
+    /* madeira-bcd: MetalFX spatial upscaling (madeira.cfg metalfx-upscale = factor) */
+    obj_handle_t fx_scaler, fx_out, fx_view[MAD_SWAP_MAX_BUFFERS];
+    UINT fx_w, fx_h;
 };
 static IDXGISwapChain4Vtbl g_swap_vtbl;
 
+static void mad_swap_release_fx(struct mad_swapchain *s) {
+    UINT i;
+    for (i = 0; i < MAD_SWAP_MAX_BUFFERS; i++)
+        if (s->fx_view[i]) { NSObject_release(s->fx_view[i]); s->fx_view[i] = 0; }
+    if (s->fx_out) { NSObject_release(s->fx_out); s->fx_out = 0; }
+    if (s->fx_scaler) { NSObject_release(s->fx_scaler); s->fx_scaler = 0; }
+    s->fx_w = s->fx_h = 0;
+}
+
 static void mad_swap_release_buffers(struct mad_swapchain *s) {
     UINT i;
+    mad_swap_release_fx(s);
     for (i = 0; i < s->nbuf; i++)
         if (s->buffers[i]) { res_Release((ID3D12Resource *)s->buffers[i]); s->buffers[i] = NULL; }
     s->nbuf = 0;
+}
+
+/* madeira-bcd: MetalFX spatial upscaling of the presented image. The game
+ * renders at its own resolution (the virtual monitor size); Present scales the
+ * back buffer by `metalfx-upscale` (madeira.cfg or the game's settings, 1.1-3)
+ * with Apple's spatial scaler before the copy into the drawable, so a game run
+ * at 960x540 or 1280x720 for frame rate reaches the panel sharpened instead of
+ * bilinear-stretched by Core Animation. Everything here is optional: any
+ * failure leaves the plain copy path. The scaler reads a 2D view of the back
+ * buffer (they are 2D arrays, ml932) and writes a private 2D texture that the
+ * present blit then copies. */
+static void mad_swap_make_fx(struct mad_swapchain *s) {
+    char v[32]; double f = 0; UINT i, ow, oh;
+    struct WMTFXSpatialScalerInfo si; struct WMTTextureInfo ti; struct WMTTextureSwizzleChannels sw;
+    static LONG said;
+    if (!mad_cfg_str_pe("metalfx-upscale", v, sizeof v) || !v[0]) return;
+    f = strtod(v, NULL);
+    if (!(f >= 1.1)) return;
+    if (f > 3.0) f = 3.0;
+    ow = ((UINT)(s->desc.Width * f + 0.5)) & ~1u;
+    oh = ((UINT)(s->desc.Height * f + 0.5)) & ~1u;
+    if (ow > 8192 || oh > 8192 || ow <= s->desc.Width) return;
+    if (!MTLDevice_supportsFXSpatialScaler(s->dev->mtl_device)) {
+        if (InterlockedIncrement(&said) <= 2) d3d12_log("[madeira-d3d12] metalfx-upscale: this GPU has no MetalFX spatial scaler\n");
+        return;
+    }
+    memset(&ti, 0, sizeof ti);
+    ti.pixel_format = s->pf; ti.width = ow; ti.height = oh; ti.depth = 1; ti.array_length = 1;
+    ti.type = WMTTextureType2D; ti.mipmap_level_count = 1; ti.sample_count = 1;
+    ti.usage = (enum WMTTextureUsage)(WMTTextureUsageRenderTarget | WMTTextureUsageShaderRead | WMTTextureUsageShaderWrite);
+    ti.options = WMTResourceStorageModePrivate;
+    s->fx_out = MTLDevice_newTexture(s->dev->mtl_device, &ti);
+    memset(&si, 0, sizeof si);
+    si.color_format = s->pf; si.output_format = s->pf;
+    si.input_width = s->desc.Width; si.input_height = s->desc.Height;
+    si.output_width = ow; si.output_height = oh;
+    if (s->fx_out) s->fx_scaler = MTLDevice_newSpatialScaler(s->dev->mtl_device, &si);
+    memset(&sw, 0, sizeof sw);
+    sw.r = WMTTextureSwizzleRed; sw.g = WMTTextureSwizzleGreen; sw.b = WMTTextureSwizzleBlue; sw.a = WMTTextureSwizzleAlpha;
+    for (i = 0; s->fx_scaler && i < s->nbuf; i++) {
+        UINT64 gid = 0;
+        s->fx_view[i] = MTLTexture_newTextureView(s->buffers[i]->texture, s->pf, WMTTextureType2D, 0, 1, 0, 1, sw, &gid);
+        if (!s->fx_view[i]) break;
+    }
+    if (!s->fx_out || !s->fx_scaler || i < s->nbuf) {
+        d3d12_log("[madeira-d3d12] metalfx-upscale %s: could not set up the scaler (texture %d, scaler %d) -- plain copy\n",
+                  v, s->fx_out != 0, s->fx_scaler != 0);
+        mad_swap_release_fx(s);
+        return;
+    }
+    s->fx_w = ow; s->fx_h = oh;
+    d3d12_log("[madeira-d3d12] metalfx-upscale %s: %ux%u -> %ux%u (MetalFX spatial)\n", v, s->desc.Width, s->desc.Height, ow, oh);
 }
 
 static HRESULT mad_swap_make_buffers(struct mad_swapchain *s) {
@@ -12836,14 +12918,15 @@ static HRESULT mad_swap_make_buffers(struct mad_swapchain *s) {
     }
     s->nbuf = n;
     s->index = 0;
+    mad_swap_make_fx(s);   /* madeira-bcd: optional MetalFX upscaling */
     /* The layer takes the same pixel format so the presenting blit is a plain
      * copy. framebuffer_only must be off: a framebuffer-only drawable cannot
      * be a blit destination. */
     memset(&props, 0, sizeof props);
     MetalLayer_getProps(s->layer, &props);
     props.device = s->dev->mtl_device;
-    props.drawable_width = s->desc.Width;
-    props.drawable_height = s->desc.Height;
+    props.drawable_width = s->fx_w ? s->fx_w : s->desc.Width;
+    props.drawable_height = s->fx_h ? s->fx_h : s->desc.Height;
     props.pixel_format = s->pf;
     props.framebuffer_only = false;
     props.display_sync_enabled = true;
@@ -13042,6 +13125,15 @@ static void mad_present_run(struct mad_swapchain *s, UINT idx) {
     tex = MetalDrawable_texture(drawable);
     cb = MTLCommandQueue_commandBuffer(s->queue->device->mtl_queue);
     if (cb && tex) {
+        obj_handle_t copy_src = src->texture;
+        UINT copy_w = src->width, copy_h = src->height;
+        if (s->fx_scaler && s->fx_out && s->fx_view[idx]) {   /* madeira-bcd: MetalFX spatial, then the copy below */
+            /* Under fence-chain 6 the scaler waits for the frame's batches on the
+             * device fence and updates it, so the blit's wait below orders after it. */
+            obj_handle_t ff = (g_f6_used && s->queue->device->enc_fence) ? s->queue->device->enc_fence : 0;
+            MTLCommandBuffer_encodeSpatialScale(cb, s->fx_scaler, s->fx_view[idx], s->fx_out, ff);
+            copy_src = s->fx_out; copy_w = s->fx_w; copy_h = s->fx_h;
+        }
         enc = MTLCommandBuffer_blitCommandEncoder(cb); if (enc) g_enc_seq++;
         if (enc && g_f6_used && s->queue->device->enc_fence) {   /* ml1134: after every committed batch, not just queue order */
             obj_handle_t df = s->queue->device->enc_fence;
@@ -13050,9 +13142,9 @@ static void mad_present_run(struct mad_swapchain *s, UINT idx) {
         if (enc) {
             memset(&t2t, 0, sizeof t2t);
             t2t.type = WMTBlitCommandCopyFromTextureToTexture;
-            t2t.src = src->texture;
-            t2t.src_size.width = src->width;
-            t2t.src_size.height = src->height;
+            t2t.src = copy_src;
+            t2t.src_size.width = copy_w;
+            t2t.src_size.height = copy_h;
             t2t.src_size.depth = 1;
             t2t.dst = tex;
             MTLBlitCommandEncoder_encodeCommands(enc, (const struct wmtcmd_base *)&t2t);
