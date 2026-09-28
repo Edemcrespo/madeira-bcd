@@ -671,7 +671,11 @@ NaN-cleared velocity target into the temporal resolve, or particles killed
 with an infinite position. Build 217 turns on `IRCompatibilityFlagSampleNanToZero`
 and `IRCompatibilityFlagVertexPositionInfToNan` (`msc-sample-nan-zero`,
 `msc-position-inf-nan`, both default 1; the shader cache keys on them, so the
-first start converts again).
+first start converts again). Correction to the comment in
+`madeira_ir_unix.mm` (left as is so 217's native ABI stays stable; fix it
+with the next native change): SampleNanToZero flushes NaN sampling
+COORDINATES to zero (man page), it does not rewrite sampled values -- the
+velocity NaN markers the game tests stay intact.
 
 ### Build 215: update packs, per-game config, MetalFX, thermal (2026-09-28)
 The owner is tired of signing and installing an IPA per experiment, so the

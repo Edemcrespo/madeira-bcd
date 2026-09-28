@@ -308,10 +308,13 @@ already did.
   start-up line `[madeira-ir] MSC 4.0.1 compatibility: ...` shows the state;
   the PE shader cache keys on all of them. Build 217 adds two more, also on by
   default, for Ghost of Tsushima's dark specks and smears around fire and
-  smoke: `msc-sample-nan-zero` (`IRCompatibilityFlagSampleNanToZero`: a sample
-  that comes back NaN reads 0 -- a filtered read across the NaN-cleared
-  velocity target is NaN on Metal, and a NaN that reaches the temporal resolve
-  stays in its history and spreads) and `msc-position-inf-nan`
+  smoke: `msc-sample-nan-zero` (`IRCompatibilityFlagSampleNanToZero`: NaN
+  sampling COORDINATES are flushed to 0, as D3D hardware treats them --
+  Apple's man page: "Flush NaN sampling coordinates to zero". The game clears
+  its velocity target to NaN on purpose, so a reprojection `uv - velocity` can
+  be NaN; Metal's result for such a sample is undefined, and a bad value that
+  reaches the temporal resolve stays in its history and spreads. The NaN
+  VALUES the game tests with isnan() are untouched) and `msc-position-inf-nan`
   (`IRCompatibilityFlagVertexPositionInfToNan`: an infinite vertex position,
   how particle systems kill a particle, becomes NaN, which Metal discards like
   D3D instead of rasterising a sliver). Non-zero biases are logged
