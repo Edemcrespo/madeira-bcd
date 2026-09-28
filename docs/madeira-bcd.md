@@ -464,7 +464,9 @@ already did.
 - Screen size (per-game settings, direct launch only): the virtual monitor's
   default size, `MADEIRA_SCREEN_W/H` with `MADEIRA_SCREEN_SRC=game`. win32u
   advertises only modes up to that many pixels (ml1140), so the 1024x768
-  default hid 1280x720; pick 1280x720 to offer 720p. A direct launch without
+  default hid 1280x720; pick 1280x720 to offer 720p. "Fill the screen"
+  (experimental) is 720 lines at the panel's aspect (`UIScreen.nativeBounds`;
+  iPhone 17 Pro Max 2868x1320 -> 1564x720). A direct launch without
   one now unsets the variables instead of inheriting a previous desktop
   session's size. The game rect and touch mapping follow the guest's live
   mode (`winios_screen_size`, re-laid-out on `MadeiraDisplayModeChanged`)

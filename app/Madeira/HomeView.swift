@@ -233,8 +233,30 @@ enum LibraryPrefs {
     private static let nvidiaKey = "madeira.library.nvidia"
     private static let safeSyncKey = "madeira.library.safeSync"
     private static let screenKey = "madeira.library.screen"
-    /// Per-game virtual monitor sizes; "" = default (1024x768).
-    static let screenSizes = ["", "1280x720", "1600x900", "1920x1080"]
+    /// Per-game virtual monitor sizes; "" = default (1024x768), "fill" = the
+    /// device's own landscape shape at 720 lines (experimental).
+    static let screenSizes = ["", "1280x720", "fill", "1600x900", "1920x1080"]
+
+    static func screenLabel(_ value: String) -> String {
+        switch value {
+        case "": return "Default (1024x768)"
+        case "fill":
+            let s = screenPixels(value)
+            return "Fill the screen, \(s.0)x\(s.1) (experimental)"
+        default: return value
+        }
+    }
+
+    /// "fill": 720 lines at the panel's aspect (iPhone 17 Pro Max 2868x1320 ->
+    /// 1564x720), so the picture needs no pillarbox. Width kept even.
+    static func screenPixels(_ value: String) -> (Int, Int) {
+        guard value == "fill" else { return ContentView.desktopSize(value) }
+        let n = UIScreen.main.nativeBounds.size
+        let long = max(n.width, n.height), short = min(n.width, n.height)
+        guard short > 0 else { return (1280, 720) }
+        let w = Int((720 * long / short / 2).rounded()) * 2
+        return (max(960, min(w, 1920)), 720)
+    }
 
     private static func dict<T>(_ key: String) -> [String: T] {
         (UserDefaults.standard.dictionary(forKey: key) as? [String: T]) ?? [:]
@@ -706,7 +728,7 @@ struct HomeView: View {
         request.safeSync = LibraryPrefs.safeSync(exe.windowsPath)
         let screen = LibraryPrefs.screen(exe.windowsPath)
         if !screen.isEmpty {
-            let s = ContentView.desktopSize(screen)
+            let s = LibraryPrefs.screenPixels(screen)
             request.screen = (w: s.0, h: s.1)
         }
         LibraryPrefs.markPlayed(game.title)
@@ -1010,7 +1032,7 @@ struct GameSettingsSheet: View {
                     Toggle("Safe thread sync (no fastsync)", isOn: $safeSync)
                     Picker("Screen size", selection: $screen) {
                         ForEach(LibraryPrefs.screenSizes, id: \.self) { size in
-                            Text(size.isEmpty ? "Default (1024x768)" : size).tag(size)
+                            Text(LibraryPrefs.screenLabel(size)).tag(size)
                         }
                     }
                     .disabled(inDesktop)
@@ -1026,8 +1048,9 @@ struct GameSettingsSheet: View {
                          + "info\" (Ghost of Tsushima). Safe thread sync turns off Madeira's fast path for "
                          + "Windows events and waits: slower, for a game whose threads crash on memory another "
                          + "thread just freed. Screen size is the virtual monitor a game starts on; its "
-                         + "resolution list stops at that many pixels, so pick 1280x720 to offer 720p. Larger "
-                         + "costs frame rate. (Inside the Wine desktop the desktop size decides.)")
+                         + "resolution list stops at that many pixels, so pick 1280x720 to offer 720p. Fill the "
+                         + "screen uses this phone's own shape at 720 lines (the game must support that aspect). "
+                         + "Larger costs frame rate. (Inside the Wine desktop the desktop size decides.)")
                 }
 
                 Section {
