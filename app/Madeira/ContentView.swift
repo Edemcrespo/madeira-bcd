@@ -113,7 +113,7 @@ final class MetalBackedView: UIView {
         self.isUserInteractionEnabled = true
         self.backgroundColor = .clear
         // A mode change reshapes the game rect (e.g. 4:3 -> 16:9).
-        NotificationCenter.default.addObserver(forName: MadeiraDisplayModeChangedNotification,
+        NotificationCenter.default.addObserver(forName: .MadeiraDisplayModeChanged,
                                                object: nil, queue: .main) { [weak self] _ in
             self?.setNeedsLayout()
             self?.layoutIfNeeded()
