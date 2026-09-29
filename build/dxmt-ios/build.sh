@@ -127,19 +127,8 @@ compile_objcxx_arc() {
         echo "FAILED"; FAILED=$((FAILED+1)); FAILED_FILES="$FAILED_FILES $name"
     fi
 }
-# madeira-bcd: deps.sh is `set -eu` and `exit 1`s when the package is absent;
-# sourced directly, that exit ends THIS script. Probe it in a subshell first.
-# MADEIRA_MSC_INCLUDE points at the converter's public headers alone (CI has
-# no installer package); the converter library itself is loaded at runtime
-# with dlopen, so the headers are all this compile needs.
-HAVE_MSC=0
-if [[ -n "${MADEIRA_MSC_INCLUDE:-}" && -f "$MADEIRA_MSC_INCLUDE/metal_irconverter/metal_irconverter.h" ]]; then
-    MSC_INCLUDE="$MADEIRA_MSC_INCLUDE"; HAVE_MSC=1
-elif [[ -f "$BUILD_DIR/../madeira-d3d12/deps.sh" ]] && \
-     ( source "$BUILD_DIR/../madeira-d3d12/deps.sh" ) >/dev/null 2>&1; then
-    source "$BUILD_DIR/../madeira-d3d12/deps.sh"; HAVE_MSC=1
-fi
-if [[ "$HAVE_MSC" == 1 ]]; then
+if [[ -f "$BUILD_DIR/../madeira-d3d12/deps.sh" ]] && \
+   source "$BUILD_DIR/../madeira-d3d12/deps.sh"; then
     echo "=== madeira-d3d12 canary (Objective-C++, Metal Shader Converter) ==="
     compile_objcxx_arc "$REPO_ROOT/research/madeira-d3d12/tests/native/msc_canary.mm" \
                        msc_canary "-DIR_PRIVATE_IMPLEMENTATION -I$MSC_INCLUDE"
@@ -161,9 +150,14 @@ if [[ "$HAVE_MSC" == 1 ]]; then
     # the LLVM 15 that airconv already links (bitcode reader + writer).
     compile_cxx "$REPO_ROOT/research/madeira-d3d12/src/unix/madeira_ags.cpp" madeira_ags
 else
-    echo "=== madeira-d3d12 canary SKIPPED (converter headers not resolvable) ==="
-    echo "=== madeira-d3d12 conversion STUB: D3D12 pipelines will fail, D3D11 unaffected ==="
-    compile_objc "$REPO_ROOT/build/madeira-d3d12/madeira_ir_stub.c" madeira_ir_stub
+    # Without madeira_ir_unix every D3D12 shader fails to convert (DXIL and DXBC
+    # alike), so an app built past this point cannot run a D3D12 game. deps.sh
+    # printed why; stop unless the caller explicitly accepts that.
+    echo "=== madeira-d3d12 conversion service NOT BUILT: D3D12 games will not work ===" >&2
+    if [ "${MADEIRA_ALLOW_NO_D3D12:-0}" != "1" ]; then
+        echo "    Fix the error above, or set MADEIRA_ALLOW_NO_D3D12=1 to build without D3D12." >&2
+        exit 1
+    fi
 fi
 
 echo "=== winemetal unix (Objective-C) ==="
