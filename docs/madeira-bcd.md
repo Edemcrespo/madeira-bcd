@@ -1,6 +1,6 @@
 # madeira-bcd: what this fork adds to willfaust/Madeira
 
-Rebased on upstream `5a82d39` (2026-09-24) on 2026-09-24; tracks upstream main by merge, plus upstream PRs #28 (WoW64, D3D9) and #29 (controller layouts) by 125hz. Upstream carries the
+Tracks upstream main by merge; since 2026-09-29 (build 222, merge of upstream `15157e3`) upstream's submodule pins and its own WoW64/D3D9/touch presets replace 125hz's PRs #28/#29. Upstream carries the
 runtime (Wine, FEX, DXMT, the native D3D12 runtime); this fork carries a CI
 build and the app-side pieces below. Everything else is upstream's.
 
@@ -98,31 +98,15 @@ line there is appended to DXMT_CONFIG. The game sheet has pickers for
 `metalfx-upscale`, `fps-limit` (applied when the session starts) and
 `dxil-tess-max-factor`, and an editor for the raw file.
 
-## WoW64 and D3D9 (125hz, upstream PR #28, not yet merged upstream)
+## WoW64 and D3D9 (upstream since build 222)
 
-Merged from `willfaust/Madeira` pull request #28 (125hz): 32-bit programs run
-in a 4 GB guest window at a per-process base (`docs/WOW64.md`), with Wine's
-i386 set in `app/Madeira/i386-windows/`, FEX's WoW64 module
-(`aarch64-windows/xtajit.dll`) and DXMT's D3D9 frontend. The binaries are
-125hz's prebuilt farm (`docs/BINARIES-WOW64.md` lists every file with its
-SHA-256), including new 64-bit `ntdll`, `nsi`, DXMT DLLs and `xtajit64.dll`.
-That `xtajit64.dll` was built from 125hz's FEX change, which the FEX
-submodule does not pin; its ARM64EC interface is upstream's plus one
-diagnostic export, so `tools/build-xtajit64.sh` keeps building the AVX
-variant from the pinned source and checks it against upstream's pre-merge
-module (fetched by commit). The two conflicts with this fork were the same
-TEB retarget fix (125hz's version kept) and the `[xp]` `pgw` placeholder.
-
-The series' unix side needs 125hz's companion source changes, so the `wine`
-and `research/dxmt` submodules point at 125hz's public forks:
-`125hz/wine` `pr/wow64-core` (c9c186e, upstream's wine pin 723d1bf plus 10
-commits: `ProcessWineIosWowGuestBase`, the wow64 thunks, fastsync) and
-`125hz/dxmt` `pr/d3d9` (462a77e, upstream's dxmt pin ca8a251 plus 18 commits:
-the D3D9 frontend and its unix-call slots 145-150, which the series'
-`winemetal.dll` calls). Without them the ntdll unix side and DXMT's unix half
-do not build (build 154), and a D3D11 title would call unix slots the old
-`winemetal_unix.c` does not have. When upstream moves either pin, the sync
-has to move to a 125hz commit that contains upstream's, or drop the series.
+Until build 221 this fork carried 125hz's PR #28 (WoW64 + DXMT D3D9) with the
+`wine`/`research/dxmt` submodules on `125hz/wine pr/wow64-core` and
+`125hz/dxmt pr/d3d9`. Build 222 switched to upstream, which now has its own
+WoW64 and D3D9 and pins wine `daa17d0`, DXMT `a5e0cd3`, FEX `2838f3b`. Lost
+until 125hz re-upstreams them: fastsync, the fs caches and the networking
+changes in 125hz's wine. CI does not build the i386 module set
+(`build/wine-i386`) yet, so 32-bit programs do not start in CI IPAs.
 
 With the series the only monitor is the virtual one, which has no source.
 `NtUserDisplayConfigGetDeviceInfo` (`build/win32u-unix/sysparams_ios.c`)
@@ -580,12 +564,17 @@ already did.
   (virtual_ios.c ml1077). Measured on an iPhone 17 Pro Max / iOS 27.0 with this
   fork's earlier implementation: 256 MB of dirtied file-backed memory moved
   phys_footprint by 0 MB against +256 MB anonymous.
-  `swap-min-kb = N` (madeira.cfg or a game's config, 256..65536) lowers the
-  tier's eligibility floor from 8 MB, for games whose data comes in smaller
-  commits (God of War sits at the 8 GB limit with only its big blocks
-  backed). A game's config can also raise `swap-mb`. Every third heartbeat
-  prints `[swap] ml1077 stats` with the MB turned away by reason: under the
-  floor, outside the guest band, not plain valloc, partly committed.
+  `swap-min-kb = N` (madeira.cfg or a game's config) lowers the tier's
+  eligibility floor from 8 MB, for games whose data comes in smaller commits
+  (God of War sits at the 8 GB limit with only its big blocks backed). Since
+  build 222 it maps onto upstream's coverage modes: it exports
+  `MADEIRA_SWAP_COVERAGE=blocks` and `MADEIRA_SWAP_MIN_KB=N` (upstream accepts
+  64 KB .. 4 GB); an `env.MADEIRA_SWAP_COVERAGE` line (classic|blocks|wide)
+  wins. A game's config can also raise `swap-mb`. Upstream's `[swap]` census
+  line (every 30 s while anything changed) gives the bytes backed and turned
+  away by reason and phys_footprint.
+- The game's config file is printed at launch (`[game-cfg]` lines), so a log
+  says which per-game keys it ran with.
 - Frame generation (experimental, game sheet > Frame generation, i.e.
   `env.MADEIRA_FRAMEGEN = 1` in the game's config; tools/patch-dxmt-framegen.py):
   winemetal's present path copies each drawable into a history texture (the

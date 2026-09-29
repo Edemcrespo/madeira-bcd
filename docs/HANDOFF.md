@@ -21,13 +21,16 @@ DXBC with DXMT's airconv) packaged as an iOS app. The owner runs Windows games
 on an **iPhone 17 Pro Max, iOS 27.0**, sideloaded with Feather. Personal use
 only; the bundle id stays `com.willfaust.mythicemu`.
 
-Upstream PRs merged into the fork (not yet merged upstream):
-* **#28 (125hz)** WoW64 32-bit guests + DXMT D3D9. Needs the companion
-  submodule forks: `wine` -> `125hz/wine` branch `pr/wow64-core`,
-  `research/dxmt` -> `125hz/dxmt` branch `pr/d3d9` (see `.gitmodules`).
-  The prebuilt DLLs from #28/#29 (i386 farm, ntdll, xtajit64) were committed
-  with the owner's explicit approval.
-* **#29 (125hz)** named touch-control layouts.
+Since build 222 (2026-09-29) the fork follows **upstream `willfaust/Madeira`
+main** and its submodule pins (wine `daa17d0`, FEX `2838f3b`, DXMT `a5e0cd3`,
+`research/madeira-dock`), with this fork's own work re-applied on top. The
+earlier 125hz PRs (#28 WoW64 + DXMT D3D9 on `125hz/wine pr/wow64-core` and
+`125hz/dxmt pr/d3d9`; #29 named touch layouts) were replaced by upstream's
+own WoW64, D3D9 import and touch presets. What that switch dropped until it
+lands upstream: 125hz's fastsync, fs caches and networking work in wine (125hz
+is re-upstreaming them as `pr/fastsync-opt-in`, `pr/async-apc-requeue`,
+`pr/image-map-notify-guard`). The pre-switch tree is the local branch
+`backup/pre-upstream-switch` = commit `563ac69` on the dev branch history.
 
 ## 2. Working conventions the owner expects
 
@@ -83,11 +86,12 @@ Upstream PRs merged into the fork (not yet merged upstream):
   syntax). Exported as `MADEIRA_CFG_GAME`; `madeira_cfg_get` lets its keys win
   over madeira.cfg and its `env.*` lines are exported last. Use it to ask the
   owner to A/B a switch for one game without any build.
-* A 12-hour "upstream sync" routine existed on the Claude side (merge
-  `willfaust/Madeira` main into the dev branch, keep 125hz's submodule
-  commits). It will not run elsewhere; do it by hand if needed:
-  `git fetch upstream main` (remote = willfaust/Madeira), merge, keep this
-  fork's additions, build, fast-forward main.
+* A 12-hour "upstream sync" routine runs on the Claude side (merge
+  `willfaust/Madeira` main into the dev branch keeping this fork's additions,
+  build, report). By hand: `git fetch upstream main` (remote =
+  willfaust/Madeira), merge, keep this fork's additions, build, fast-forward
+  main. Since build 222 upstream's side (and its submodule pins) wins where it
+  replaced something we carried.
 
 ## 3. Hard rules (do not break)
 
@@ -678,19 +682,39 @@ tracked DLL and stay green).
   build and never lost the old ones; entries of earlier builds are removed
   once per build (log: `DXBC shader cache: removed N entries`).
 
-### Upstream sync on hold (checks 2026-09-29 00:59 and 12:59 UTC)
-upstream/main is 100 commits ahead (9e8291e WoW64 series, then 15157e3:
-library/Steam/input/media series, Settings for every madeira.cfg option, and
-upstream's own swap-tier change "back only large allocations unless wider
-coverage is chosen", which overlaps our swap-min-kb). Upstream's wine pin
-(now daa17d0) does not contain ours (125hz c9c186e); ours has ~7.8k lines
-more (fastsync, fs caches, networking). 125hz is re-upstreaming those pieces
-as separate branches on top of daa17d0 (pr/fastsync-opt-in f6848ad4,
-pr/async-apc-requeue, pr/image-map-notify-guard); no single branch has them
-all. Upstream's native files expect its wine, so a partial merge does not
-build. The owner was offered: wait (recommended), switch fully to upstream,
-or record the merge keeping our tree. No answer yet; the routine should stay
-quiet until this changes (a 125hz branch that has both, or the owner decides).
+### Build 222: switched to upstream (2026-09-29, owner's decision)
+Merge commit `4ccfcb5` brings in upstream main `15157e3` (77 commits: Library
+front end, Steam sign-in, Madeira Dock, GuestDisplay/HardwareInput, WoW64,
+DXMT's D3D9, swap-tier coverage modes + census, the DXIL conversion cache and
+one-pass conversion). How the overlaps were resolved:
+* `build/ntdll-unix/virtual_ios.c`: upstream's file, then our commits since
+  `735e323` re-applied in order. Skipped as superseded: 6442b98/3115f50
+  (our early storage-backed memory) and 81a799a (our swap floor). Our
+  partial-page `decommit_pages` stays, now with upstream's
+  `ios_swap_release_range` before the mmap-over.
+* `swap-min-kb` now exports `MADEIRA_SWAP_COVERAGE=blocks` plus
+  `MADEIRA_SWAP_MIN_KB` (upstream reads the floor only in blocks mode); an
+  `env.MADEIRA_SWAP_COVERAGE` line still wins. Upstream prints
+  `[swap] coverage=...` and a census line every 30 s instead of our
+  `[swap] ml1077 stats`.
+* `madeira_d3d12.c`: our PE shader cache (`mad_ir_convert_cached`) wraps both
+  calls of upstream's one-pass conversion (first try and too-small retry).
+  `cs-dump = 1` or `MADEIRA_D3D12_CS_DUMP=1` turns the compute dump on.
+* `madeira_ir_unix.mm`: upstream's `mad_sc_path_ext` (DXIL cache files share
+  `shadercache/`) keeps our `.mdsc` pruning; the hull/domain entry-name
+  fallback applies to upstream's reflected name.
+* `tools/patch-dxmt-framegen.py`: new present-hook anchor (DXMT now guards
+  `ios_frame_encode_present` with `madeira_frame_hooks_on()`). The other DXMT
+  patches apply unchanged to `a5e0cd3`. Upstream now has its own 30 FPS
+  mode 3; our frame-limits patch's mode-3 branch is dead code, mode 4 (40)
+  still works.
+* CI: builds FFmpeg (`build/ffmpeg`, cached; the app links libav*.a) and the
+  Dock host (`build/madeira-dock`, may fail without breaking the build).
+  32-bit `i386-windows` modules (`build/wine-i386`) are NOT built by CI yet,
+  so 32-bit games will not start in CI IPAs.
+* Launch log prints the game's config file (`[game-cfg]` lines).
+* Removed 16 host tests from 125hz's WoW64 series that probe code no longer
+  in the tree; `ConfigCatalog.generated.swift` regenerated (it lists our keys).
 
 ### Build 220 device results (God of War, logs 2026-09-29 14:42 / 14:54)
 * Frame generation works: `[framegen]` generated a frame for every real one,
