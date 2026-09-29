@@ -258,7 +258,6 @@ final class MetalBackedView: UIView {
             }
             LogStore.shared.log("MetalLayer registered with DXMT shim (window-hosted singleton)", level: .success)
         }
-        publishGameRect()
     }
 
     override func layoutSubviews() {
@@ -267,7 +266,6 @@ final class MetalBackedView: UIView {
             applyDisplayMode(reason: "layout")
             let full = convert(bounds, to: w)
             winios_set_compositor_frame(full.minX, full.minY, full.width, full.height)
-            publishGameRect()
         }
     }
 
@@ -542,12 +540,6 @@ final class MetalBackedView: UIView {
             return
         }
         guard let t = touches.first else { return }
-        // A direct launch's pointer can move without us (the drawn cursor is
-        // seeded at the centre when a window appears), so start from it.
-        if !desktopMode {
-            var cx: Int32 = 0, cy: Int32 = 0
-            if winios_get_cursor_position(&cx, &cy) != 0 { Self.cursor = CGPoint(x: Int(cx), y: Int(cy)) }
-        }
         let p = t.location(in: self)
         touchStartPoint = p
         lastPanPoint = p
