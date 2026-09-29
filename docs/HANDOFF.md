@@ -678,6 +678,20 @@ tracked DLL and stay green).
   build and never lost the old ones; entries of earlier builds are removed
   once per build (log: `DXBC shader cache: removed N entries`).
 
+### Upstream sync on hold (checks 2026-09-29 00:59 and 12:59 UTC)
+upstream/main is 100 commits ahead (9e8291e WoW64 series, then 15157e3:
+library/Steam/input/media series, Settings for every madeira.cfg option, and
+upstream's own swap-tier change "back only large allocations unless wider
+coverage is chosen", which overlaps our swap-min-kb). Upstream's wine pin
+(now daa17d0) does not contain ours (125hz c9c186e); ours has ~7.8k lines
+more (fastsync, fs caches, networking). 125hz is re-upstreaming those pieces
+as separate branches on top of daa17d0 (pr/fastsync-opt-in f6848ad4,
+pr/async-apc-requeue, pr/image-map-notify-guard); no single branch has them
+all. Upstream's native files expect its wine, so a partial merge does not
+build. The owner was offered: wait (recommended), switch fully to upstream,
+or record the merge keeping our tree. No answer yet; the routine should stay
+quiet until this changes (a 125hz branch that has both, or the owner decides).
+
 ### Build 220 device results (God of War, logs 2026-09-29 14:42 / 14:54)
 * Frame generation works: `[framegen]` generated a frame for every real one,
   HUD 40 FPS shown / 20 rendered, "Frame Interpolator Enabled". Costly: GPU
