@@ -1280,6 +1280,9 @@ static void *ios_pool_warmer_thread( void *arg )
                             (unsigned long long)vmi.compressed >> 20,
                             (unsigned long long)vmi.external >> 20,
                             (unsigned long long)vmi.reusable >> 20, cycle);
+                    /* madeira-bcd: the swap tier's use and what it turned away, with
+                     * the footprint it relates to (quiet builds too; one line / 30 s). */
+                    if ((cycle % 3) == 0) { extern void ios_swap_stats_line( void ); ios_swap_stats_line(); }
                 }
             }
 
@@ -17116,6 +17119,13 @@ static unsigned ios_swap_n;
 static struct { uint64_t off, len; } ios_swap_free[8192];
 static unsigned ios_swap_nfree;
 static unsigned long long ios_swap_bytes, ios_swap_peak, ios_swap_backs, ios_swap_releases, ios_swap_unbacks, ios_swap_refused;
+/* madeira-bcd: eligibility floor (was a fixed 8 MB). God of War sits at the
+ * 8 GB limit with its big blocks already file-backed (~1.6 GB); the rest of its
+ * data comes in smaller commits. madeira.cfg / the game's config swap-min-kb
+ * (exported by the app as MADEIRA_SWAP_MIN_KB), 256 KB .. 64 MB. Commits the
+ * tier turns away are summed by reason (>= 64 KB only) for the stats line. */
+static size_t ios_swap_min = 8u << 20;
+static unsigned long long ios_swap_no_small, ios_swap_no_band, ios_swap_no_kind, ios_swap_no_used;
 
 static void ios_swap_init( void )
 {
@@ -17127,10 +17137,21 @@ static void ios_swap_init( void )
     if (!f || !*f || !mb) return;
     ios_swap_cap = (uint64_t)strtoull( mb, NULL, 10 ) << 20;
     if (ios_swap_cap < (64ull << 20)) return;
+    {
+        const char *mk = getenv( "MADEIRA_SWAP_MIN_KB" );
+        if (mk && *mk)
+        {
+            unsigned long long kb = strtoull( mk, NULL, 10 );
+            if (kb < 256) kb = 256;
+            if (kb > 65536) kb = 65536;
+            ios_swap_min = (size_t)kb << 10;
+        }
+    }
     ios_swap_fd = open( f, O_RDWR | O_CLOEXEC );
     if (ios_swap_fd < 0) { dprintf( 2, "[swap] ml1077 cannot open %s (errno %d): tier OFF\n", f, errno ); return; }
     if (ftruncate( ios_swap_fd, (off_t)ios_swap_cap )) { dprintf( 2, "[swap] ml1077 ftruncate failed (errno %d): tier OFF\n", errno ); close( ios_swap_fd ); ios_swap_fd = -1; return; }
-    dprintf( 2, "[swap] ml1077 file-backed guest data tier ON: %s, cap %llu MB\n", f, (unsigned long long)(ios_swap_cap >> 20) );
+    dprintf( 2, "[swap] ml1077 file-backed guest data tier ON: %s, cap %llu MB, commits from %zu KB\n", f,
+             (unsigned long long)(ios_swap_cap >> 20), ios_swap_min >> 10 );
 }
 static uint64_t ios_swap_take( size_t len )
 {
@@ -17163,11 +17184,13 @@ static void ios_swap_give( uint64_t off, size_t len )
 static int ios_swap_eligible( const void *base, size_t size, unsigned int vprot, struct file_view *view )
 {
     uintptr_t b = (uintptr_t)base;
+    int big = size >= (64u << 10);
     if (ios_swap_fd < 0) return 0;
     if (!(vprot & VPROT_WRITE) || (vprot & (VPROT_EXEC | VPROT_WRITECOPY | VPROT_GUARD | VPROT_WRITEWATCH))) return 0;
-    if (!view || !is_view_valloc( view ) || (view->protect & (SEC_FILE | SEC_IMAGE | SEC_RESERVE | VPROT_SYSTEM))) return 0;
-    if (b < 0x7000000000ULL || b >= 0x7c00000000ULL) return 0;   /* the guest band only */
-    if (size < (8u << 20)) return 0;
+    if (!view || !is_view_valloc( view ) || (view->protect & (SEC_FILE | SEC_IMAGE | SEC_RESERVE | VPROT_SYSTEM)))
+    { if (big) ios_swap_no_kind += size; return 0; }
+    if (b < 0x7000000000ULL || b >= 0x7c00000000ULL) { if (big) ios_swap_no_band += size; return 0; }   /* the guest band only */
+    if (size < ios_swap_min) { if (big) ios_swap_no_small += size; return 0; }
     return 1;
 }
 static void ios_swap_back( void *base, size_t size, unsigned int vprot )
@@ -17264,9 +17287,11 @@ int ios_swap_overlaps_probe( const void *base, size_t size ) { return ios_swap_o
 void ios_swap_stats_line( void )
 {
     if (ios_swap_fd < 0) return;
-    dprintf( 2, "[swap] ml1077 stats: %llu MB file-backed now (peak %llu), %u extents, file used %llu of %llu MB, backs %llu releases %llu unbacks %llu refused %llu\n",
+    dprintf( 2, "[swap] ml1077 stats: %llu MB file-backed now (peak %llu), %u extents, file used %llu of %llu MB, backs %llu releases %llu unbacks %llu refused %llu"
+             " | turned away (cumulative, commits >= 64 KB): under %zu KB %llu MB, outside the guest band %llu MB, not plain valloc %llu MB, partly committed %llu MB\n",
              ios_swap_bytes >> 20, ios_swap_peak >> 20, ios_swap_n, (unsigned long long)(ios_swap_bump >> 20),
-             (unsigned long long)(ios_swap_cap >> 20), ios_swap_backs, ios_swap_releases, ios_swap_unbacks, ios_swap_refused );
+             (unsigned long long)(ios_swap_cap >> 20), ios_swap_backs, ios_swap_releases, ios_swap_unbacks, ios_swap_refused,
+             ios_swap_min >> 10, ios_swap_no_small >> 20, ios_swap_no_band >> 20, ios_swap_no_kind >> 20, ios_swap_no_used >> 20 );
 }
 
 static NTSTATUS decommit_pages( struct file_view *view, char *base, size_t size )
@@ -22227,6 +22252,7 @@ static NTSTATUS allocate_virtual_memory( void **ret, SIZE_T *size_ptr, ULONG typ
             unsigned int sv = 0;
             ios_swap_init();
             if (!any_committed && !get_vprot_flags( protect, &sv, 0 ) && ios_swap_eligible( base, size, sv, view )) ios_swap_back( base, size, sv );
+            else if (any_committed && ios_swap_fd >= 0 && size >= ios_swap_min) ios_swap_no_used += size;   /* madeira-bcd */
         }
         if (!status && view && (view->protect & SEC_RESERVE))
         {

@@ -580,6 +580,12 @@ already did.
   (virtual_ios.c ml1077). Measured on an iPhone 17 Pro Max / iOS 27.0 with this
   fork's earlier implementation: 256 MB of dirtied file-backed memory moved
   phys_footprint by 0 MB against +256 MB anonymous.
+  `swap-min-kb = N` (madeira.cfg or a game's config, 256..65536) lowers the
+  tier's eligibility floor from 8 MB, for games whose data comes in smaller
+  commits (God of War sits at the 8 GB limit with only its big blocks
+  backed). A game's config can also raise `swap-mb`. Every third heartbeat
+  prints `[swap] ml1077 stats` with the MB turned away by reason: under the
+  floor, outside the guest band, not plain valloc, partly committed.
 - Bundle identifier `com.willfaust.mythicemu`, so an installed copy keeps its
   container (Wine prefix, library, covers) across updates.
 - Update packs and per-game config: see their sections above. Game sheet >
