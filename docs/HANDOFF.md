@@ -682,6 +682,31 @@ tracked DLL and stay green).
   build and never lost the old ones; entries of earlier builds are removed
   once per build (log: `DXBC shader cache: removed N entries`).
 
+### Build 223: library first, madeira-bcd home as a choice (2026-09-29)
+Owner's request: upstream's interface by default, ours as a separate option,
+our per-game options inside upstream's game page, every upstream feature.
+* Also merges upstream a15332c (MadeiraMemoryHost app extension: memory
+  owned by another task, used by the swap tier first; `mempool-mb = N` in
+  madeira.cfg or Settings > Memory & sync, off by default; needs `swap-mb`)
+  and d5a8e0a (library tab bar). The extension's bundle id was changed to
+  `com.willfaust.mythicemu.MemoryHost` (must be prefixed by the app's id).
+  Worth trying for God of War's memory: `mempool-mb` next to `swap-mb`.
+* Interface: `FrontendChoice` has a third stored value "bcd". RootView
+  starts in ContentView (library / developer) unless it is "bcd". Picker:
+  library Settings > Interface, madeira-bcd home settings; the developer
+  interface has a "madeira-bcd Home" button.
+* `LibraryBCD.swift`: the madeira-bcd sections of `LibraryDetail` (AVX,
+  Wine VCRT, NVIDIA; MetalFX, frame gen, D3D12 switches, game config file;
+  Home Screen link), keyed by the Windows path as in HomeView, so both
+  interfaces share settings. Library launches call `BCDLaunch.applyLibrary`
+  (update pack env, the options, per-game session log). Resolution picker:
+  "Screen shape for MetalFX 1.5x"; FPS picker: 40 FPS. Long press: Play /
+  Game settings. Settings > Interface > "Add every game in drive_c".
+  Shortcuts (madeira://play) start the library entry in library mode.
+* RDR2: upstream has no separate RDR2 package; its RDR2 bring-up lives in
+  the runtime we merged (ntdll-unix, madeira_d3d12, the converter service,
+  swap tier), plus `research/HANDOFF-rdr2-arm64ec-hooks.md`.
+
 ### Build 222: switched to upstream (2026-09-29, owner's decision)
 Merge commit `4ccfcb5` brings in upstream main `15157e3` (77 commits: Library
 front end, Steam sign-in, Madeira Dock, GuestDisplay/HardwareInput, WoW64,
@@ -710,8 +735,9 @@ one-pass conversion). How the overlaps were resolved:
   still works.
 * CI: builds FFmpeg (`build/ffmpeg`, cached; the app links libav*.a) and the
   Dock host (`build/madeira-dock`, may fail without breaking the build).
-  32-bit `i386-windows` modules (`build/wine-i386`) are NOT built by CI yet,
-  so 32-bit games will not start in CI IPAs.
+  The 32-bit `i386-windows` set is still 125hz's committed farm; CI does not
+  rebuild it from upstream's wine (`build/wine-i386`), so 32-bit games may
+  not match the new wine.
 * Launch log prints the game's config file (`[game-cfg]` lines).
 * Removed 16 host tests from 125hz's WoW64 series that probe code no longer
   in the tree; `ConfigCatalog.generated.swift` regenerated (it lists our keys).

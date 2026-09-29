@@ -105,14 +105,29 @@ Until build 221 this fork carried 125hz's PR #28 (WoW64 + DXMT D3D9) with the
 `125hz/dxmt pr/d3d9`. Build 222 switched to upstream, which now has its own
 WoW64 and D3D9 and pins wine `daa17d0`, DXMT `a5e0cd3`, FEX `2838f3b`. Lost
 until 125hz re-upstreams them: fastsync, the fs caches and the networking
-changes in 125hz's wine. CI does not build the i386 module set
-(`build/wine-i386`) yet, so 32-bit programs do not start in CI IPAs.
+changes in 125hz's wine. The i386 module set is still 125hz's committed
+farm; CI does not rebuild it from upstream's wine (`build/wine-i386`), so
+32-bit programs may not match the new wine.
 
 With the series the only monitor is the virtual one, which has no source.
 `NtUserDisplayConfigGetDeviceInfo` (`build/win32u-unix/sysparams_ios.c`)
 dereferenced `monitor->source->gpu` for it and Ghost of Tsushima died in the
 syscall; it now skips source-less monitors, as `NtUserQueryDisplayConfig`
 already did.
+
+## Interface (`app/Madeira/LibraryBCD.swift`)
+
+Upstream's library is the default screen (since build 223). Settings >
+Interface picks Library, madeira-bcd home (this fork's `HomeView`) or the
+developer interface; the developer interface also has a "madeira-bcd Home"
+button. The library's game page carries this fork's options in three
+"madeira-bcd" sections (launch switches, graphics & performance with the
+game's config file, Home Screen link), stored per Windows path exactly as
+madeira-bcd home stores them. The library's Resolution picker adds the
+screen's shape at 480 lines for MetalFX 1.5x, its FPS picker adds 40 FPS, a
+long press on a game offers Play and Game settings, and "Add every game in
+drive_c" imports what madeira-bcd home would list. A library launch exports
+the update pack, the game's options and starts the per-game session log.
 
 ## Runtime
 
