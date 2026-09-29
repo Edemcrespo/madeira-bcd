@@ -682,6 +682,16 @@ tracked DLL and stay green).
   build and never lost the old ones; entries of earlier builds are removed
   once per build (log: `DXBC shader cache: removed N entries`).
 
+### Build 226: first green IPA after the switch (2026-09-29, run 36595079405)
+Commit 17088ab (main fast-forwarded; the automatic main run 227 cancelled).
+Native ABI e708a9072e35d90d, shader cache identity 1f62cb76a67abb1f: packs
+5-7 do not install over it. Contains everything under builds 222-223. The
+i386 farm came from the CI cache. Not in it: the AVX variant of
+xtajit64.dll (the committed module does not match a rebuild of FEX
+2838f3b, so tools/build-xtajit64.sh refuses to ship one); the per-game
+"AVX / AVX2" switch has no effect until that is sorted out. Device test
+pending: library + madeira-bcd sections, God of War with its config.
+
 ### Build 223: library first, madeira-bcd home as a choice (2026-09-29)
 Owner's request: upstream's interface by default, ours as a separate option,
 our per-game options inside upstream's game page, every upstream feature.
