@@ -686,6 +686,18 @@ tracked DLL and stay green).
   stops with 0xC0000135 before any frame. Start the game's own GoW.exe in
   the install root instead. DXVK itself is Vulkan and cannot run here: DXMT
   is the D3D11 path, so do not use the DXVK DLLs.
+* God of War, second run with the right exe (log 13:02, 43 MB): it reaches
+  the main menu (~16-27 FPS); on New Game the footprint climbs to 7.7 GB and
+  jetsam kills it. `[mem-census] tex-private live=4051MB` (12,411 textures),
+  buffers 785 MB. The automatic BC mip clamp (dxmt ml2000, threshold 1536 MB
+  headroom) engaged only at footprint 7188 MB and clamped 6 textures:
+  too late for a title that loads 4 GB of textures at once. Workaround with no
+  build, in the game's config: `dxmt = d3d11.mipClampBC=1` (drops the top mip
+  of every eligible BC texture, ~4x less memory for them). 95 % of the log is
+  `fixme:d3dcompiler:skip_u32_unknown` from D3DReflect on 4 threads:
+  `env.WINEDEBUG = err+all,err-virtual,fixme-all` in the game's config.
+  Candidate follow-up (dxmt, IPA): a larger auto threshold or a footprint
+  trend trigger.
 * Far Cry 5 (D3D11): it gets past the loading screen to a black window
   (d3d11/dxgi/winemetal loaded, no device created yet). ~50 first-chance
   write faults on read-only pages are handled (protection layer). Right after
