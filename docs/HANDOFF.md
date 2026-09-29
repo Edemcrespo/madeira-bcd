@@ -678,6 +678,15 @@ tracked DLL and stay green).
   build and never lost the old ones; entries of earlier builds are removed
   once per build (log: `DXBC shader cache: removed N entries`).
 
+### Build 219: swap floor knob (2026-09-29, run 36554968715, native ABI d22451074a1a1504)
+* `swap-min-kb` (madeira.cfg or a game's config) lowers the swap tier's 8 MB
+  eligibility floor; `[swap] ml1077 stats` prints every third heartbeat with
+  the MB turned away by reason. Packs 5/6 are native-ABI 48a89bc6... and are
+  ignored by 219; 219 already contains their changes.
+* God of War config to try: `dxmt = d3d11.mipClampBC=2`,
+  `env.WINEDEBUG = err+all,err-virtual,fixme-all`, `swap-min-kb = 1024`,
+  `swap-mb = 6144`.
+
 ### Other games tried 2026-09-29 (IPA 218 + pack 5)
 * God of War (2018, D3D11): the owner started
   `C:\God of War\_Windows 7 Fix\dxvk-1.10.1\GoW.exe`, a copy inside a
