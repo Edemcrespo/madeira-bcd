@@ -92,7 +92,7 @@ enum FrameLimit: Int32, CaseIterable, Identifiable {
 
     static func apply(_ limit: FrameLimit) {
         madeira_set_vsync_locked(Int32(limit.rawValue))
-        ProMotionIntent.shared.setActive(wantsHighRefresh(limit.rawValue))
+        ProMotionIntent.apply(mode: limit.rawValue)
     }
 }
 
@@ -160,7 +160,7 @@ struct SessionPanelView: View {
 
                 Section {
                     Picker("Mode", selection: $input.mode) {
-                        Text("Trackpad").tag(InputSettings.PointerMode.trackpad)
+                        Text("Absolute").tag(InputSettings.PointerMode.absolute)
                         Text("Touch").tag(InputSettings.PointerMode.touch)
                         Text("Relative").tag(InputSettings.PointerMode.relative)
                     }

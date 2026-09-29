@@ -78,7 +78,6 @@ volatile long long ios_affinity_sets;   /* ml1117 */
 #include "wine/debug.h"
 #include "unix_private.h"
 #include "ios_wow.h"
-#include "ios_srv_stats.h"   /* ml951: [thrinfo] buckets */
 
 WINE_DEFAULT_DEBUG_CHANNEL(thread);
 WINE_DECLARE_DEBUG_CHANNEL(seh);
@@ -1243,14 +1242,6 @@ static DECLSPEC_NORETURN void pthread_exit_wrapper( int status )
             extern void ios_thread_died( unsigned tid );
             ios_thread_died( (unsigned)(ULONG_PTR)NtCurrentTeb()->ClientId.UniqueThread );
         }
-        /* ml1990: this thread will never run guest code again — mark its Mach
-         * registry row EXITING (reclaimed once the kernel thread is dead) and
-         * return its x18 trampoline slot. Both used to leak for the session.
-         * MADEIRA_THREAD_REG_RECLAIM=0 / MADEIRA_TRAMP_RECLAIM=0 roll back. */
-        {
-            extern void ios_thread_registry_exit_self(void);
-            ios_thread_registry_exit_self();
-        }
     }
     pthread_exit( UIntToPtr(status) );
 }
@@ -1345,7 +1336,7 @@ void *get_cpu_area( USHORT machine )
 #else
     cpu = ULongToPtr( NtCurrentTeb64()->TlsSlots[WOW64_TLS_CPURESERVED] );
 #endif
-    /* iOS-Madeira (WOW64_DESIGN.md, stage C review F3): wow_peb is a SESSION
+    /* iOS-Madeira wow_peb is a SESSION
      * global while pseudo-processes share the address space, so once any
      * 32-bit child exists is_wow64() is true on 64-bit threads too — and those
      * threads have no CPU area.  Upstream can dereference unconditionally
@@ -1402,7 +1393,7 @@ NTSTATUS init_thread_stack( TEB *teb, ULONG_PTR limit, SIZE_T reserve_size, SIZE
     if (wow_teb)
     {
         WOW64_CPURESERVED *cpu;
-        /* iOS-Madeira (stage C review F1): size and tag the CPU area from the
+        /* iOS-Madeira : size and tag the CPU area from the
          * OWNING pseudo-process's main image, not from the session global.
          * main_image_info is restored to the session's exe by
          * wine_ios_child_main (loader_ios.c, "main_image_info =
@@ -1768,85 +1759,57 @@ done:
 /***********************************************************************
  *           abort_thread
  */
-static void ios_drop_user_lock(void);
-
 void abort_thread( int status )
 {
     pthread_sigmask( SIG_BLOCK, &server_block_set, NULL );
-#ifdef WINE_IOS
-    /* ml1650: a server call that hits EOF lands here while its caller may still
-     * be inside an uninterrupted section (fd_cache_mutex) or hold the user lock. */
-    ios_drop_user_lock();
-#endif
     if (InterlockedDecrement( &nb_threads ) <= 0) abort_process( status );
     pthread_exit_wrapper( status );
 }
 
-
-#ifdef WINE_IOS
-/* iOS-Madeira ml1090: DROP WIN32U'S USER LOCK BEFORE THIS THREAD STOPS
- * EXISTING.
- *
- * win32u is loaded once for the whole Mach task here, so its `user_mutex` is
- * one lock shared by the shell, every title and every service — see the long
- * comment on it in build/win32u-unix/sysparams_ios.c. A thread killed while
- * holding it wedges every message pump in the session (device logs 75 and 78:
- * three pseudo-processes parked in __psynch_mutexwait with no live owner, and
- * a black screen for the rest of the run).
- *
- * Weak, because ntdll must still link in a build without win32u, and a no-op
- * on any thread that does not own the lock — so it is safe on every exit path.
- */
-extern void user_lock_abandon(void) __attribute__((weak));
-
-extern void ios_drop_fd_cache_lock( const char *why );   /* ml1650, server_ios.c */
-
-static void ios_drop_user_lock(void)
-{
-    if (user_lock_abandon) user_lock_abandon();
-    ios_drop_fd_cache_lock( "thread exit" );   /* ml1650: same rule for ntdll's fd cache lock */
-}
-#else
-static void ios_drop_user_lock(void) { }
-#endif
 
 /***********************************************************************
  *           abort_process
  */
 void abort_process( int status )
 {
-    ios_drop_user_lock();
 #ifdef WINE_IOS
-    /* iOS-Madeira: _exit() KILLS THE WHOLE APP.
+    /* ml937: _exit() HERE KILLED THE WHOLE APP.
      *
-     * Pseudo-processes are threads in one Mach task, and `exit()` is redirected
-     * to the wine_ios_exit shim (shims/wine_ios_exit.h), which longjmps back to
-     * this pseudo-process's own entry thread.  `_exit()` is NOT redirected — it
-     * is the raw syscall — so every caller of abort_process took the entire
-     * Madeira process down with one Windows process.
+     * On a normal Wine host one Windows process is one Unix process, so
+     * `_exit()` is the correct immediate kill for TerminateProcess(). On iOS
+     * every Windows process is a PSEUDO-process inside the single Mach task,
+     * and `_exit()` is not shimmed the way exit() is (shims/wine_ios_exit.h) —
+     * so any guest calling TerminateProcess(GetCurrentProcess(), code) took the
+     * app, wineserver, and every other pseudo-process down with it, with no
+     * crash report and no further log output because the exit is clean.
      *
-     * That is exactly the path a child whose loader_init failed takes:
-     * ntdll's loader_init calls NtTerminateProcess( GetCurrentProcess(), ... )
-     * WITHOUT the preceding NtTerminateProcess( 0, ... ) that RtlExitUserProcess
-     * makes, so process_ios.c's self-terminate branch sees exiting_flag == FALSE
-     * and lands here.  Device log (2026-09-12): an i386 desktop child failed its
-     * imports, printed `MADEIRA-EXIT: ... status=-1073741515`, and the log — and
-     * the app — ended on the very next instruction.
+     * Found by a game whose exe spawns its own bundled launcher and then
+     * terminates itself with code 0: the child had a full PEB, private
+     * ARM64EC ntdll, TEB and Mach handler and was one instruction from its PE
+     * entry point when the parent's self-terminate erased the task. That is
+     * ordinary Windows behaviour for a bootstrapper exe, and there were ZERO
+     * exceptions in the run — nothing said "the app should have died here".
      *
-     * The distinction abort_process draws upstream (skip atexit handlers) is
-     * meaningless here; what matters is that only THIS pseudo-process dies and
-     * that its wineserver socket reaches EOF so the parent's CreateProcess wait
-     * returns.  process_exit_wrapper() does exactly that and then calls the
-     * redirected exit().  Same teardown as exit_process(), deliberately. */
-    dprintf( 2, "[proc-exit] abort_process(status=0x%x) -> pseudo-process teardown "
-                "(NOT _exit: that would end the whole app)\n", (unsigned)status );
+     * Correct mapping: tear down THIS pseudo-process only, exactly as
+     * exit_process() does. The two paths differ on Windows in that abort skips
+     * LdrShutdownProcess (no DLL_PROCESS_DETACH, no atexit), which has already
+     * happened by the time we get here — the unix-side teardown is the same
+     * work either way: close this process's wineserver master socket (the EOF
+     * is how the server learns the process died and wakes its waiters), drop
+     * its fd cache and reclaim its JIT-pool allocations.
+     *
+     * Still owed: process_exit_wrapper's exit() only longjmps on a
+     * pseudo-process's MAIN thread; a non-main thread calling it falls back to
+     * pthread_exit and leaves that process's other threads running on a
+     * reclaimed pool. That hole predates this change and is shared with
+     * exit_process. */
+    pthread_sigmask( SIG_BLOCK, &server_block_set, NULL );
+    ERR( "abort_process: status=0x%x — tearing down this pseudo-process only (ml937; was _exit, which killed the app)\n",
+         (unsigned int)status );
     process_exit_wrapper( get_unix_exit_code( status ));
-    /* process_exit_wrapper never returns on iOS (exit() shim longjmps, or
-     * pthread_exit()s a thread that has no jmpbuf). */
-    for (;;) pthread_exit( NULL );
-#else
-    _exit( get_unix_exit_code( status ));
+    /* noreturn */
 #endif
+    _exit( get_unix_exit_code( status ));
 }
 
 
@@ -1858,7 +1821,6 @@ static DECLSPEC_NORETURN void exit_thread( int status )
     static void *prev_teb;
     TEB *teb;
 
-    ios_drop_user_lock();
     pthread_sigmask( SIG_BLOCK, &server_block_set, NULL );
 
     if (InterlockedDecrement( &nb_threads ) <= 0) exit_process( status );
@@ -1882,7 +1844,6 @@ static DECLSPEC_NORETURN void exit_thread( int status )
  */
 void exit_process( int status )
 {
-    ios_drop_user_lock();
 #ifdef WINE_IOS
     ERR("exit_process: raw_status=0x%x unix_code=%d\n", (unsigned)status, get_unix_exit_code(status));
 #endif
@@ -2667,77 +2628,6 @@ static BOOL is_process_wow64( const CLIENT_ID *id )
 }
 
 /******************************************************************************
- *   iOS-Madeira ml951: NtQueryInformationThread's own-thread cache
- *
- * [srv-stats] put `get_thread_info' second only to `get_message': 103140
- * requests in a 10 s window, ~10 k/s, and every one of them originates in
- * NtQueryInformationThread below (the only other caller in this file is
- * ios_mach_thread_for_handle(), which runs once per terminate).
- *
- * Most of what ThreadBasicInformation returns for the CALLING thread cannot
- * change while that thread is the one asking:
- *   - ExitStatus is STATUS_PENDING by construction (we are running);
- *   - TebBaseAddress and ClientId are fixed for the lifetime of the thread;
- *   - Priority / BasePriority / AffinityMask change only through
- *     NtSetInformationThread, which bumps ios_thread_info_gen.
- * So a one-entry per-thread cache, keyed on the HANDLE it was learned from
- * and invalidated by the generation counter, answers the whole call with no
- * server round trip.  The handle key is what lets a real (non-pseudo) self
- * handle hit as well: the first query resolves it, and reply->tid tells us it
- * was us.  A handle to ANOTHER thread is never cached — ExitStatus there is
- * exactly the thing the caller is polling for.
- *
- * The generation counter is process-wide and bumped by every
- * NtSetInformationThread, so a SetThreadPriority on any thread invalidates
- * every cache; a cross-process priority change (which does not pass through
- * this ntdll) is covered by the IOS_TBI_MAX_USES refresh cap.
- */
-#define IOS_TBI_MAX_USES 4096
-
-struct ios_self_tbi
-{
-    HANDLE                   handle;   /* handle this entry was learned from */
-    unsigned int             gen;      /* 0 = empty                          */
-    unsigned int             uses;
-    THREAD_BASIC_INFORMATION info;
-};
-
-static __thread struct ios_self_tbi ios_self_tbi;
-static unsigned int ios_thread_info_gen = 1;
-
-static BOOL ios_tbi_get( HANDLE handle, THREAD_BASIC_INFORMATION *info )
-{
-    struct ios_self_tbi *c = &ios_self_tbi;
-
-    if (!c->gen || c->handle != handle) return FALSE;
-    if (c->gen != __atomic_load_n( &ios_thread_info_gen, __ATOMIC_RELAXED )) return FALSE;
-    if (++c->uses > IOS_TBI_MAX_USES) { c->gen = 0; return FALSE; }
-    *info = c->info;
-    return TRUE;
-}
-
-static void ios_tbi_put( HANDLE handle, const THREAD_BASIC_INFORMATION *info )
-{
-    struct ios_self_tbi *c = &ios_self_tbi;
-
-    if (info->ClientId.UniqueThread != NtCurrentTeb()->ClientId.UniqueThread ||
-        info->ExitStatus != STATUS_PENDING)
-    {
-        c->gen = 0;   /* another thread, or one that has exited: never cache */
-        return;
-    }
-    c->handle = handle;
-    c->info   = *info;
-    c->uses   = 0;
-    c->gen    = __atomic_load_n( &ios_thread_info_gen, __ATOMIC_RELAXED );
-}
-
-static void ios_tbi_invalidate(void)
-{
-    __atomic_fetch_add( &ios_thread_info_gen, 1, __ATOMIC_RELAXED );
-}
-
-/******************************************************************************
  *              NtQueryInformationThread  (NTDLL.@)
  */
 NTSTATUS WINAPI NtQueryInformationThread( HANDLE handle, THREADINFOCLASS class,
@@ -2753,15 +2643,6 @@ NTSTATUS WINAPI NtQueryInformationThread( HANDLE handle, THREADINFOCLASS class,
     {
         THREAD_BASIC_INFORMATION info;
         const ULONG_PTR affinity_mask = get_system_affinity_mask();
-
-        if (ios_tbi_get( handle, &info ))
-        {
-            ios_srv_thrinfo_count( IOS_TI_BASIC_SELF );
-            ios_srv_thrinfo_count( IOS_TI_BASIC_CACHED );
-            if (data) memcpy( data, &info, min( length, sizeof(info) ));
-            if (ret_len) *ret_len = min( length, sizeof(info) );
-            return STATUS_SUCCESS;
-        }
 
         SERVER_START_REQ( get_thread_info )
         {
@@ -2787,13 +2668,9 @@ NTSTATUS WINAPI NtQueryInformationThread( HANDLE handle, THREADINFOCLASS class,
                 else
                     info.TebBaseAddress = NULL;
             }
-            ios_srv_thrinfo_count( info.ClientId.UniqueThread == NtCurrentTeb()->ClientId.UniqueThread
-                                   ? IOS_TI_BASIC_SELF : IOS_TI_BASIC_OTHER );
-            ios_tbi_put( handle, &info );
             if (data) memcpy( data, &info, min( length, sizeof(info) ));
             if (ret_len) *ret_len = min( length, sizeof(info) );
         }
-        else ios_srv_thrinfo_count( IOS_TI_BASIC_OTHER );
         return status;
     }
 
@@ -2801,20 +2678,6 @@ NTSTATUS WINAPI NtQueryInformationThread( HANDLE handle, THREADINFOCLASS class,
     {
         const ULONG_PTR affinity_mask = get_system_affinity_mask();
         ULONG_PTR affinity = 0;
-        THREAD_BASIC_INFORMATION info;
-
-        ios_srv_thrinfo_count( IOS_TI_AFFINITY );
-        /* only for the pseudo handle: a real handle would need the server's
-         * THREAD_QUERY_INFORMATION check, which GetCurrentThread() always
-         * passes and which the cached entry cannot stand in for. */
-        if (handle == GetCurrentThread() && ios_tbi_get( handle, &info ))
-        {
-            ios_srv_thrinfo_count( IOS_TI_AFFINITY_CACHED );
-            affinity = info.AffinityMask;
-            if (data) memcpy( data, &affinity, min( length, sizeof(affinity) ));
-            if (ret_len) *ret_len = min( length, sizeof(affinity) );
-            return STATUS_SUCCESS;
-        }
 
         SERVER_START_REQ( get_thread_info )
         {
@@ -2836,7 +2699,6 @@ NTSTATUS WINAPI NtQueryInformationThread( HANDLE handle, THREADINFOCLASS class,
         KERNEL_USER_TIMES kusrt;
         int unix_pid, unix_tid;
 
-        ios_srv_thrinfo_count( IOS_TI_TIMES );
         SERVER_START_REQ( get_thread_times )
         {
             req->handle = wine_server_obj_handle( handle );
@@ -2881,7 +2743,6 @@ NTSTATUS WINAPI NtQueryInformationThread( HANDLE handle, THREADINFOCLASS class,
     case ThreadAmILastThread:
     {
         if (length != sizeof(ULONG)) return STATUS_INFO_LENGTH_MISMATCH;
-        ios_srv_thrinfo_count( IOS_TI_AMILAST );
         SERVER_START_REQ( get_thread_info )
         {
             req->handle = wine_server_obj_handle( handle );
@@ -2899,7 +2760,6 @@ NTSTATUS WINAPI NtQueryInformationThread( HANDLE handle, THREADINFOCLASS class,
 
     case ThreadQuerySetWin32StartAddress:
     {
-        ios_srv_thrinfo_count( IOS_TI_START_ADDR );
         SERVER_START_REQ( get_thread_info )
         {
             req->handle = wine_server_obj_handle( handle );
@@ -2921,20 +2781,8 @@ NTSTATUS WINAPI NtQueryInformationThread( HANDLE handle, THREADINFOCLASS class,
         const ULONG_PTR affinity_mask = get_system_affinity_mask();
         GROUP_AFFINITY affinity;
 
-        THREAD_BASIC_INFORMATION info;
-
         memset( &affinity, 0, sizeof(affinity) );
         affinity.Group = 0; /* Wine only supports max 64 processors */
-
-        ios_srv_thrinfo_count( IOS_TI_AFFINITY );
-        if (handle == GetCurrentThread() && ios_tbi_get( handle, &info ))
-        {
-            ios_srv_thrinfo_count( IOS_TI_AFFINITY_CACHED );
-            affinity.Mask = info.AffinityMask;
-            if (data) memcpy( data, &affinity, min( length, sizeof(affinity) ));
-            if (ret_len) *ret_len = min( length, sizeof(affinity) );
-            return STATUS_SUCCESS;
-        }
 
         SERVER_START_REQ( get_thread_info )
         {
@@ -2963,7 +2811,6 @@ NTSTATUS WINAPI NtQueryInformationThread( HANDLE handle, THREADINFOCLASS class,
         ULONG terminated;
 
         if (length != sizeof(ULONG)) return STATUS_INFO_LENGTH_MISMATCH;
-        ios_srv_thrinfo_count( IOS_TI_TERMINATED );
         SERVER_START_REQ( get_thread_info )
         {
             req->handle = wine_server_obj_handle( handle );
@@ -2982,7 +2829,6 @@ NTSTATUS WINAPI NtQueryInformationThread( HANDLE handle, THREADINFOCLASS class,
         if (length != sizeof(ULONG)) return STATUS_INFO_LENGTH_MISMATCH;
         if (!data) return STATUS_ACCESS_VIOLATION;
 
-        ios_srv_thrinfo_count( IOS_TI_SUSPEND );
         SERVER_START_REQ( get_thread_info )
         {
             req->handle = wine_server_obj_handle( handle );
@@ -3000,7 +2846,6 @@ NTSTATUS WINAPI NtQueryInformationThread( HANDLE handle, THREADINFOCLASS class,
         len = length >= sizeof(*info) ? length - sizeof(*info) : 0;
         ptr = info ? (WCHAR *)(info + 1) : NULL;
 
-        ios_srv_thrinfo_count( IOS_TI_NAME );
         SERVER_START_REQ( get_thread_info )
         {
             req->handle = wine_server_obj_handle( handle );
@@ -3048,7 +2893,6 @@ NTSTATUS WINAPI NtQueryInformationThread( HANDLE handle, THREADINFOCLASS class,
     case ThreadPriorityBoost:
     {
         if (length != sizeof(ULONG)) return STATUS_INFO_LENGTH_MISMATCH;
-        ios_srv_thrinfo_count( IOS_TI_OTHER_CLASS );
         SERVER_START_REQ( get_thread_info )
         {
             req->handle = wine_server_obj_handle( handle );
@@ -3102,13 +2946,6 @@ NTSTATUS WINAPI NtSetInformationThread( HANDLE handle, THREADINFOCLASS class,
     unsigned int status;
 
     TRACE("(%p,%d,%p,%x)\n", handle, class, data, length);
-
-    /* ml951: any set at all invalidates every cached ThreadBasicInformation
-     * in the process.  Bumping unconditionally (rather than per class) keeps
-     * the rule "a set is a fence" — a new class that changes a cached field
-     * cannot be added here and silently leave stale caches behind. */
-    ios_srv_thrinfo_count( IOS_TI_SET );
-    ios_tbi_invalidate();
 
     switch (class)
     {

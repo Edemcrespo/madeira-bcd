@@ -15,7 +15,10 @@ struct MadeiraApp: App {
         WindowGroup {
             RootView()
                 .modifier(ClaimGamepadEvents())
-                .onAppear { GamepadInput.shared.start() }
+                .onAppear {
+                    GamepadInput.shared.start()
+                    HardwareInput.shared.start()
+                }
                 // madeira-bcd: madeira://play?exe=... (Home Screen shortcuts)
                 .onOpenURL { ShortcutRouter.shared.handle($0) }
         }

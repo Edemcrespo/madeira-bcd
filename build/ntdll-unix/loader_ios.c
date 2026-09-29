@@ -583,15 +583,6 @@ static const char *get_pe_dir( WORD machine )
     }
 }
 
-/* Same answer as get_pe_dir(), exported so the spawn path can SAY which PE farm
- * a child's system DLLs will be resolved from.  Routing an i386 child at an
- * aarch64/arm64ec farm (or vice versa) otherwise shows up only as a child that
- * never produces a window. */
-const char *ios_pe_dir_for_machine( WORD machine )
-{
-    return get_pe_dir( machine );
-}
-
 static WORD get_alt_machine( WORD machine )
 {
     switch (machine)
@@ -2076,35 +2067,15 @@ static void load_ntdll_functions( HMODULE module )
      * import one authoritative value instead of hardcoding a slot. This runs
      * after the discovery in the init path above, so the offset is already
      * known and non-zero. */
-    /* ml800: this publish is already generic — it runs from load_ntdll() for
-     * whichever native PE ntdll this session loaded (aarch64-windows or
-     * arm64ec-windows) and is NOT gated on is_arm64ec(). What it cannot do is
-     * write into an export the PE does not have, and the shipped
-     * aarch64-windows/ntdll.dll (PE timestamp 2026-08-02, SizeOfImage 0xf0000)
-     * predates ntdll.spec's `ios_teb_tsd_offset` line: its export table jumps
-     * straight from p_ios_jit_reverse_translate_addr (1451) to
-     * __wine_unixlib_handle (1452), while arm64ec (1460) and i386 (1475) both
-     * carry it. A 32-bit MAIN image runs on that aarch64 ntdll, so the WoW64
-     * CPU module's GetProcAddress returns NULL and it refuses to start.
-     *
-     * The old GET_FUNC here reported that as a bare "not found", which is
-     * indistinguishable from the dozens of other optional-export lines. Say
-     * what is missing, in which module, and what breaks because of it. */
     {
         extern int ios_teb_tls_slot_offset;
-        pios_teb_tsd_offset = (unsigned int *)find_named_export( module, exports, "ios_teb_tsd_offset" );
+        GET_FUNC( ios_teb_tsd_offset );
         if (pios_teb_tsd_offset)
         {
             *pios_teb_tsd_offset = (unsigned int)ios_teb_tls_slot_offset;
-            dprintf( 2, "[teb-tsd] published offset=0x%x to ntdll export at %p (module %p)\n",
-                     *pios_teb_tsd_offset, pios_teb_tsd_offset, module );
+            ERR("[teb-tsd] published offset=0x%x to ntdll export at %p\n",
+                *pios_teb_tsd_offset, pios_teb_tsd_offset);
         }
-        else
-            dprintf( 2, "[teb-tsd] FATAL-FOR-WOW64: native ntdll at %p does NOT export "
-                        "ios_teb_tsd_offset (slot offset 0x%x stays unpublished). The WoW64 CPU "
-                        "module refuses to run without it; rebuild this PE ntdll from "
-                        "dlls/ntdll/ntdll.spec, which already declares the export.\n",
-                     module, (unsigned int)ios_teb_tls_slot_offset );
     }
     /* ml797: hand the FEX arena to the PE side as plain data. It cannot travel
      * as an environment variable -- its consumer runs before any CRT or TEB
@@ -2292,7 +2263,7 @@ static void load_ntdll_functions( HMODULE module )
 static void load_ntdll_wow64_functions( HMODULE module )
 {
     const IMAGE_EXPORT_DIRECTORY *exports;
-    /* WOW64_DESIGN.md §2/§3: every p* entry of LdrSystemDllInitBlock ends up
+    /* every p* entry of LdrSystemDllInitBlock ends up
      * in a 32-bit CONTEXT (Eip/Pc for LdrInitializeThunk, the Ki*Dispatchers,
      * RtlUserThreadStart), so it must hold a GUEST address.  find_named_export
      * returns module + rva, i.e. HOST, so subtract B.  The one host-valued
@@ -2300,7 +2271,7 @@ static void load_ntdll_wow64_functions( HMODULE module )
      * guest base too: wow64.dll adds B back before using it as an HMODULE.
      * Outside a window wow_base is 0 and this is the classic identity.
      *
-     * stage C review F5: the conversion must be NULL-preserving.
+     * the conversion must be NULL-preserving.
      * find_named_export() returns 0 for an export this ntdll does not have
      * (RtlpFreezeTimeBias and RtlpQueryProcessDebugInformationRemote are
      * genuinely absent in Wine's i386 ntdll), and a plain `- wow_base` would
@@ -2743,7 +2714,7 @@ static void load_apiset_dll(void)
         return;
     }
     peb->ApiSetMap = map;
-    /* iOS-Madeira (WOW64_DESIGN.md §3 invariant 1): wow_peb holds
+    /* iOS-Madeira wow_peb holds
      * GUEST addresses.  When this process has no window the view is a plain
      * host mapping with no guest address at all, and PtrToUlong() would
      * publish a truncated host pointer that 32-bit ntdll would dereference in
@@ -3055,13 +3026,7 @@ static void start_main_thread(void)
     set_load_order_app_name( main_wargv[0] );
     WINE_IOS_LOG("init_thread_stack...");
     init_thread_stack( teb, 0, 0, 0 );
-    /* iOS-Madeira: NAMED, and created through the same helper every child
-     * pseudo-process uses.  wineserver handle tables are per pseudo-process, so
-     * an anonymous handle created here would name a different object (or
-     * nothing) in every later process that falls back to it — the same class of
-     * bug as the GDI shared section.  See ios_default_keyed_event() in
-     * wine/dlls/ntdll/unix/sync.c; the name is the one Windows uses. */
-    keyed_event = ios_default_keyed_event();
+    NtCreateKeyedEvent( &keyed_event, GENERIC_READ | GENERIC_WRITE, NULL, 0 );
     /* ml756: take FEX's host arena BEFORE any PE module is placed.
      *
      * This is the whole point of the placeholder: once guest DLLs start
@@ -3460,7 +3425,7 @@ DECLSPEC_EXPORT void wine_ios_child_main( int argc, char *argv[], int child_fd_s
     dprintf(STDERR_FILENO, "[Wine child] wine_ios_child_main: argc=%d argv[1]=%s fd=%d\n",
             argc, argc > 1 ? argv[1] : "(none)", child_fd_socket);
 
-    /* WOW64_DESIGN.md §2: every early-return below used to be a bare dprintf,
+    /* every early-return below used to be a bare dprintf,
      * so a child that died during bring-up produced no ERR at all and the
      * parent simply never saw a process appear.  CHILD_STAGE() names the stage
      * the child is in; CHILD_BOOT_FAIL() is the single exit that reports it. */
@@ -3483,7 +3448,7 @@ DECLSPEC_EXPORT void wine_ios_child_main( int argc, char *argv[], int child_fd_s
             is_arm64ec(), main_image_info.Machine, current_machine,
             argc > 1 ? argv[1] : "?");
 
-    /* WOW64_DESIGN.md §2: a 32-bit child gets its own [B, B+4G) guest window,
+    /* a 32-bit child gets its own [B, B+4G) guest window,
      * reserved HERE — before the TEB/PEB pair, because that pair has to live
      * inside it (guest code reads TEB32->Self, TEB32->Peb and the 32-bit
      * process parameters as guest addresses < 4 GB).  ios_child_main_machine
@@ -3530,7 +3495,7 @@ DECLSPEC_EXPORT void wine_ios_child_main( int argc, char *argv[], int child_fd_s
      * causing corruption when both PE loaders modify it. */
     if (ios_wow_base())
     {
-        /* WOW64_DESIGN.md §2: a 32-bit child's PEB pair must be guest-
+        /* a 32-bit child's PEB pair must be guest-
          * addressable — PEB32 sits at child_peb + page_size and the guest
          * reads it through TEB32->Peb.  Allocating through Wine (rather than
          * a raw mmap) both places it in this process's window and registers a
@@ -3604,7 +3569,7 @@ DECLSPEC_EXPORT void wine_ios_child_main( int argc, char *argv[], int child_fd_s
     child_peb->TlsBitmapBits[1] = 0;
     /* Point child's TEB to the new PEB */
     teb->Peb = child_peb;
-    /* WOW64_DESIGN.md §2: the window now has an owner, so every later
+    /* the window now has an owner, so every later
      * ios_wow_base()/ios_wow_base_for_peb() lookup resolves through the PEB
      * (including from other threads and from NtQueryInformationProcess). */
     CHILD_STAGE( "window-bind" );
@@ -3681,7 +3646,7 @@ DECLSPEC_EXPORT void wine_ios_child_main( int argc, char *argv[], int child_fd_s
          * thread reads identity owner-aware from here on. */
         {
             SECTION_IMAGE_INFORMATION session_image_info = main_image_info;
-            /* WOW64_DESIGN.md §3: `wow_peb` is a SESSION global, and init_peb()
+            /* `wow_peb` is a SESSION global, and init_peb()
              * (env_ios.c) only ever WRITES it — for a 32-bit image — so it
              * stays pointing at the previous 32-bit pseudo-process when a
              * 64-bit child boots next.  init_peb's `if (wow_peb)` block then
@@ -3728,12 +3693,12 @@ DECLSPEC_EXPORT void wine_ios_child_main( int argc, char *argv[], int child_fd_s
          * come from) left the child booting with TEB32 stack fields at 0 and
          * faulting on its first guest push, with nothing said about it. */
         CHILD_STAGE( "init_thread_stack" );
-        if ((status = init_thread_stack( teb, 0, 0, 0 )))
+        if ((status = init_thread_stack( teb, 0, 0, 0 )) && ios_wow_base())
             CHILD_BOOT_FAIL( "init_thread_stack returned 0x%x (window %p, guest ceiling %p)\n",
                              (unsigned)status, (void *)ios_wow_base(),
                              (void *)user_space_wow_limit );
 
-        /* WOW64_DESIGN.md §2: a 32-bit child needs its own i386 ntdll mapped
+        /* a 32-bit child needs its own i386 ntdll mapped
          * (and LdrSystemDllInitBlock filled with GUEST addresses) exactly as
          * start_main_thread does for the session's main process.  The child
          * boot path never did this — there had never been a 32-bit child. */
@@ -3750,8 +3715,11 @@ DECLSPEC_EXPORT void wine_ios_child_main( int argc, char *argv[], int child_fd_s
          * the child path never did, so every `api-ms-win-*` import of every
          * module this child loads failed.  Same position, but per-machine and
          * window-aware (see ios_child_load_apiset). */
-        CHILD_STAGE( "load_apiset" );
-        ios_child_load_apiset( ios_cur_image_info()->Machine );
+        if (!is_machine_64bit( ios_cur_image_info()->Machine ))
+        {
+            CHILD_STAGE( "load_apiset" );
+            ios_child_load_apiset( ios_cur_image_info()->Machine );
+        }
 
         /* X3c: a cross-arch child (AMD64 exe, non-EC session) cannot run on
          * the session's aarch64 ntdll at all — load the ARM64EC build as a

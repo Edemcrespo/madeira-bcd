@@ -301,6 +301,36 @@ jobs:
             build/gnutls-ios/src
           key: gnutls-ios-gmp6.3.0-nettle3.10.1-gnutls3.8.9-v1
 
+      # Upstream's winegstreamer unix side (build/ntdll-unix) compiles against
+      # toolchains/ffmpeg-ios, and the app target links the four archives from
+      # app/Madeira/. The source tarball is tracked; cache the result.
+      - name: Restore FFmpeg iOS
+        id: ffmpegcache
+        uses: actions/cache/restore@v4
+        with:
+          path: toolchains/ffmpeg-ios
+          key: ffmpeg-ios-${{ hashFiles('build/ffmpeg/build.sh', 'build/ffmpeg/src/SHA256SUMS') }}
+
+      - name: Build FFmpeg for iOS
+        shell: bash
+        run: |
+          if [ "${{ steps.ffmpegcache.outputs.cache-hit }}" = "true" ]; then
+            for lib in libavformat libavcodec libswresample libavutil; do
+              cp toolchains/ffmpeg-ios/lib/$lib.a app/Madeira/$lib.a
+            done
+            echo "FFmpeg restored from cache"
+          else
+            bash build/ffmpeg/build.sh
+          fi
+          ls -la app/Madeira/libav*.a app/Madeira/libswresample.a
+
+      - name: Save FFmpeg iOS
+        if: steps.ffmpegcache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: toolchains/ffmpeg-ios
+          key: ffmpeg-ios-${{ hashFiles('build/ffmpeg/build.sh', 'build/ffmpeg/src/SHA256SUMS') }}
+
       - name: Build ntdll-unix
         # Keep going so one run reports every broken stage (and caches FEX and
         # LLVM). "Verify all linked archives exist" still fails the job before
@@ -812,6 +842,12 @@ jobs:
           else
             echo "::warning::no Metal Shader Converter headers -- D3D12 shader conversion is a stub in this build"
           fi
+
+      # Upstream's Madeira Dock (Steam library helper): dockhost.exe is a build
+      # output; without it the Dock stays hidden, so a failure here only warns.
+      - name: Build Madeira Dock host
+        continue-on-error: true
+        run: bash build/madeira-dock/build.sh
 
       # 30 and 40 FPS caps (pacing modes 3 and 4) for the Session panel.
       - name: Patch DXMT present pacing with 30/40 FPS modes

@@ -167,16 +167,15 @@ static WINDOWPROC *find_winproc( WNDPROC func, BOOL ansi )
     return NULL;
 }
 
-/* iOS-Madeira ml1360: a 32-bit program's winproc handle (0xffffNNNN) can
- * reach win32u with its guest window base added.  The WoW64 thunks for
+/* A 32-bit program's winproc handle (0xffffNNNN) can reach win32u with its
+ * guest window base added.  The WoW64 thunks for
  * CallWindowProc (win_proc_params.func) and RegisterClass (lpfnWndProc)
  * convert those fields as guest addresses, so 0xffff0036 arrives as
  * B + 0xffff0036.  get_winproc_ptr() then does not recognise it as a handle,
  * win32u hands it back as a plain procedure, the conversion back to 32 bits
- * yields 0xffff0036 again, and user32 calls it as code.  Device log prev 15:
- * FEX "NoExec instruction in entry block: FFFF0036" inside the webhelper's
- * window callback, then 6770 "dispatch_user_callback ignoring exception"
- * lines as every message to the login window was dropped.  The top 64 KB of
+ * yields 0xffff0036 again, and user32 calls it as code: the CPU module then
+ * reports a no-exec entry block at FFFF0036 and every message to that window
+ * is dropped.  The top 64 KB of
  * a 32-bit address space never holds code, so a value of that form inside
  * the caller's window is the handle.  MADEIRA_WINPROC_HANDLE=0 disables. */
 extern ULONG_PTR ios_wow_base(void);
@@ -347,7 +346,7 @@ DLGPROC get_dialog_proc( DLGPROC ret, BOOL ansi )
 
 static void init_user(void)
 {
-    /* iOS-Madeira (WOW64_DESIGN.md §3 invariant 2): gdi_init() -> font_init()
+    /* gdi_init() -> font_init()
      * dereferences Peb->AnsiCodePageData / OemCodePageData /
      * UnicodeCaseTableData.  In a 32-bit process those three PEB64 fields were
      * written by the guest's own ntdll with the WoW64 identity conversion, so
@@ -856,39 +855,7 @@ ATOM WINAPI NtUserGetClassInfoEx( HINSTANCE instance, UNICODE_STRING *name, WNDC
         }
         atom = class_shm->atom;
     }
-    /* iOS-Madeira ml1090: THIS RETURN LEAKED THE USER LOCK, AND THE LEAK KILLED
-     * THE SESSION.
-     *
-     * find_class() returns with the USER lock HELD (release_class_ptr drops
-     * it), and upstream's `if (status) return 0;` drops out without releasing.
-     * Upstream that path is unreachable: get_shared_class only fails when
-     * class->shared is NULL, which a registered class never has.
-     *
-     * It is reachable HERE because this port added the freed-shared-object
-     * guard to get_shared_class/get_shared_window_class above (`if
-     * (!object->id) return STATUS_INVALID_HANDLE`) — and that guard exists
-     * precisely because class_list is a SINGLE win32u list shared by every
-     * pseudo-process, so a process that dies without unregistering leaves
-     * entries whose shared object has been freed (id == 0). Any later class
-     * lookup that walks onto one of those entries used to spin forever; since
-     * the guard it returns an error — through this return, with the lock still
-     * held.
-     *
-     * What that cost on device (logs 75 and 78, two unrelated titles): the
-     * very next win32u entry point on the same thread hit user_check_not_lock,
-     * which asserted, and the abort could not unwind the mutex — so the
-     * session-wide USER lock was left held by a thread that was being killed
-     * and every other pseudo-process's message pump parked in
-     * __psynch_mutexwait for the rest of the run. Black screen, [frame] n=0.
-     *
-     * user_check_not_lock() now recovers rather than aborting, but the leak
-     * itself is the bug: release the lock on every exit, as every other caller
-     * of find_class/get_class_ptr in this file already does. */
-    if (status)
-    {
-        release_class_ptr( class );
-        return 0;
-    }
+    if (status) return 0;
 
     if (menu_name) *menu_name = class->menu_name;
     release_class_ptr( class );

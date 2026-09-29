@@ -850,32 +850,55 @@ static void load_root_certs(void)
         import_certs_from_path( CRYPT_knownLocations[i], TRUE );
 }
 
-/* iOS-Madeira ml1400: PER-CALLER ENUMERATION OF THE HOST ROOTS.
- *
- * Upstream hands out the head of root_cert_list and frees it, which is right
- * when every process has its own unix side. Here every pseudo-process shares
- * this one, so the first process to import roots consumed the whole bundle
- * and every later import saw none. rootstore.c then treats certificates it
- * imported earlier but no longer sees on the host as removed there, and
- * deletes them from HKLM\...\SystemCertificates\Root. Device log 169: the
- * Windows Steam client (pid 0034) validated its first server chains, then
- * after the browser helper's crypt32 started, every api.steampowered.com
- * chain ended at ISRG Root X1 with CERT_TRUST_IS_UNTRUSTED_ROOT (0x20), and
- * the client never reached its servers.
- *
- * The list is now kept for the whole session and each enumerating thread has
- * its own position. The rootstore loop runs on one thread and calls until
- * STATUS_NO_MORE_ENTRIES, asking again for the same certificate after growing
- * its buffer, so the position advances only when a certificate was copied. It
- * is dropped at the end of the list, and a position idle for more than 10 s is
- * restarted, so an interrupted enumeration cannot truncate a later one.
- * MADEIRA_ROOT_ENUM_SHARED=0 restores the consuming behavior. */
+/* On iOS this one unix side serves every pseudo-process of the session.  A
+ * 32-bit process's root store import must not consume the list another
+ * process is still importing from, so a WoW64 caller enumerates with a
+ * per-thread position instead (ios_enum_root_certs_wow).  The lock serialises
+ * the one-time load and every walk or removal of the list. */
 #include <pthread.h>
 #include <stdint.h>
 #include <time.h>
+static pthread_mutex_t ios_root_lock = PTHREAD_MUTEX_INITIALIZER;
+static BOOL ios_roots_loaded;
+
+static void ios_load_roots_locked(void)
+{
+    if (!ios_roots_loaded) load_root_certs();
+    ios_roots_loaded = TRUE;
+}
+
+static NTSTATUS enum_root_certs( void *args )
+{
+    struct enum_root_certs_params *params = args;
+    struct list *ptr;
+    struct root_cert *cert;
+    NTSTATUS status = STATUS_SUCCESS;
+
+    pthread_mutex_lock( &ios_root_lock );
+    ios_load_roots_locked();
+
+    if (!(ptr = list_head( &root_cert_list ))) status = STATUS_NO_MORE_ENTRIES;
+    else
+    {
+        cert = LIST_ENTRY( ptr, struct root_cert, entry );
+        *params->needed = cert->size;
+        if (cert->size <= params->size)
+        {
+            memcpy( params->buffer, cert->data, cert->size );
+            list_remove( &cert->entry );
+            free( cert );
+        }
+    }
+    pthread_mutex_unlock( &ios_root_lock );
+    return status;
+}
+
+/* The WoW64 enumeration: each thread keeps its own position; the rootstore
+ * loop runs on one thread and asks again for the same certificate after
+ * growing its buffer, so the position advances only when one was copied.  The
+ * position is dropped at the end of the list and restarted after 10 s idle. */
 #define IOS_ROOT_CURSORS 32
 static struct { uintptr_t thread; unsigned int index; unsigned long long stamp; } ios_root_cursor[IOS_ROOT_CURSORS];
-static pthread_mutex_t ios_root_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static unsigned long long ios_root_now_ms(void)
 {
@@ -884,20 +907,8 @@ static unsigned long long ios_root_now_ms(void)
     return (unsigned long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
-static int ios_root_enum_shared(void)
+static NTSTATUS ios_enum_root_certs_wow( struct enum_root_certs_params *params )
 {
-    static int enabled = -1;
-    if (enabled < 0)
-    {
-        const char *env = getenv( "MADEIRA_ROOT_ENUM_SHARED" );
-        enabled = !env || strcmp( env, "0" );
-    }
-    return enabled;
-}
-
-static NTSTATUS ios_enum_root_certs_shared( struct enum_root_certs_params *params )
-{
-    static unsigned int reported;
     uintptr_t self = (uintptr_t)pthread_self();
     unsigned long long now = ios_root_now_ms();
     unsigned int i, slot = IOS_ROOT_CURSORS, oldest = 0, n = 0;
@@ -905,6 +916,7 @@ static NTSTATUS ios_enum_root_certs_shared( struct enum_root_certs_params *param
     NTSTATUS status;
 
     pthread_mutex_lock( &ios_root_lock );
+    ios_load_roots_locked();
     for (i = 0; i < IOS_ROOT_CURSORS; i++)
     {
         if (ios_root_cursor[i].thread == self) { slot = i; break; }
@@ -923,12 +935,6 @@ static NTSTATUS ios_enum_root_certs_shared( struct enum_root_certs_params *param
         if (n++ == ios_root_cursor[slot].index) break;
     if (ptr == &root_cert_list)
     {
-        if (reported < 16)
-        {
-            reported++;
-            dprintf( 2, "[root-enum] ml1400 thread=%#lx served=%u of %u host roots\n",
-                     (unsigned long)self, ios_root_cursor[slot].index, n );
-        }
         ios_root_cursor[slot].thread = 0;
         ios_root_cursor[slot].index = 0;
         ios_root_cursor[slot].stamp = 0;
@@ -949,31 +955,6 @@ static NTSTATUS ios_enum_root_certs_shared( struct enum_root_certs_params *param
     return status;
 }
 
-static NTSTATUS enum_root_certs( void *args )
-{
-    struct enum_root_certs_params *params = args;
-    static BOOL loaded;
-    struct list *ptr;
-    struct root_cert *cert;
-
-    pthread_mutex_lock( &ios_root_lock );
-    if (!loaded) load_root_certs();
-    loaded = TRUE;
-    pthread_mutex_unlock( &ios_root_lock );
-
-    if (ios_root_enum_shared()) return ios_enum_root_certs_shared( params );
-    if (!(ptr = list_head( &root_cert_list ))) return STATUS_NO_MORE_ENTRIES;
-    cert = LIST_ENTRY( ptr, struct root_cert, entry );
-    *params->needed = cert->size;
-    if (cert->size <= params->size)
-    {
-        memcpy( params->buffer, cert->data, cert->size );
-        list_remove( &cert->entry );
-        free( cert );
-    }
-    return STATUS_SUCCESS;
-}
-
 const unixlib_entry_t __wine_unix_call_funcs[] =
 {
     process_attach,
@@ -988,12 +969,10 @@ const unixlib_entry_t __wine_unix_call_funcs[] =
 C_ASSERT( ARRAYSIZE(__wine_unix_call_funcs) == unix_funcs_count );
 
 #ifdef _WIN64
-/* iOS-Madeira, WoW64 guest window (WOW64_DESIGN.md 2): in every thunk below
- * `args` is already a HOST pointer - the WoW64 module converts that one outer
- * pointer - but every pointer EMBEDDED in the 32-bit block, and every pointer
- * nested inside those, is still a GUEST address.  ios_wow_host_ptr() is the
- * +B conversion (NULL-preserving) and ios_wow_guest_ptr32() writes one back;
- * both are plain ULongToPtr/PtrToUlong off the iOS port. */
+/* In every thunk below `args` is already a HOST pointer (the WoW64 module
+ * converts that one outer pointer) but every pointer EMBEDDED in the 32-bit
+ * block is still a GUEST address: ios_wow_host_ptr() is the +B conversion
+ * (NULL-preserving), and plain ULongToPtr off the iOS port. */
 
 typedef ULONG PTR32;
 
@@ -1082,7 +1061,7 @@ static NTSTATUS wow64_enum_root_certs( void *args )
         ios_wow_host_ptr( params32->needed )
     };
 
-    return enum_root_certs( &params );
+    return ios_enum_root_certs_wow( &params );
 }
 
 const unixlib_entry_t __wine_unix_call_wow64_funcs[] =

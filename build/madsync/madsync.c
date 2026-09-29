@@ -125,10 +125,28 @@ int madsync_enabled(void)
     static int state = -1;
     if (state < 0)
     {
-        int on = madeira_cfg_bool( "inproc-sync", 0 );   /* off by default: the fastsync cells own the in-process wait path; madeira.cfg inproc-sync = 1 opts in */
+        /* This first runs inside the wineserver thread on its first object and
+         * the answer is kept for the whole app run, so the log also says what
+         * was read and from where (see madeira_cfg__dir for the directory rules). */
+        char v[32];
+        int set = madeira_cfg_get( "inproc-sync", v, sizeof v );
+        int on = madeira_cfg_bool( "inproc-sync", 1 );   /* ml1095: madeira.cfg inproc-sync = 0 disables */
+        /* Madeira Dock: the app sets MADEIRA_MADSYNC_SESSION=0 only for a session that runs a
+         * game's one-time installers first (Wine's services.exe never answered its RPC clients
+         * under madsync on device). Unset, or any other value: unchanged. Read once, like the
+         * cfg key, so it holds for the whole session. */
+        const char *session = getenv( "MADEIRA_MADSYNC_SESSION" );
+        if (on && session && !strcmp( session, "0" ))
+        {
+            on = 0;
+            dprintf( 2, "[madsync] off for this session (MADEIRA_MADSYNC_SESSION=0: one-time installs)\n" );
+        }
         state = on;
-        dprintf( 2, "[madsync] ml1058 in-process synchronisation %s (madeira.cfg inproc-sync = 1 enables; fastsync is the default)\n",
+        dprintf( 2, "[madsync] ml1058 in-process synchronisation %s (madeira.cfg inproc-sync = 0 disables)\n",
                  on ? "ENABLED" : "disabled" );
+        dprintf( 2, "[madsync] config inproc-sync=%s cfg=%s dir=%s (MADEIRA_CFG_EARLY_DOCS=0 restores the old lookup)\n",
+                 set ? (v[0] ? v : "(empty)") : "unset",
+                 madeira_cfg_present() ? "present" : "absent", madeira_cfg_dir_source() );
     }
     return state;
 }

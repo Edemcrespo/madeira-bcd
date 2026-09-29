@@ -1,56 +1,46 @@
 /*
- * iOS-Madeira override for wine/dlls/win32u/syscall.c.
+ * Unix interface for Win32 syscalls, iOS override
  *
- * THE RULE, and why upstream's cannot be used verbatim here.
+ * Copyright (C) 2021 Alexandre Julliard
+ * Copyright 2026 125hz
  *
- * Upstream win32u keeps one process-global, `zero_bits`, set at unix-lib init
- * when the process has a WoW64 TEB:
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
  *
- *     if (NtCurrentTeb()->WowTebOffset)
- *         zero_bits = (ULONG_PTR)info.HighestUserAddress | 0x7fffffff;
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
  *
- * Every later NtAllocateVirtualMemory in win32u passes it, so the GDI shared
- * handle table (gdiobj.c), DC_ATTR buckets (dc.c), DIB section pixel buffers
- * (dib.c), message return buffers (message.c) and Vulkan host mappings
- * (vulkan.c) land where 32-bit guest code can address them.  That is not an
- * optimisation: win32u hands those addresses to the guest, and 32-bit gdi32
- * TRUNCATES them (wine/dlls/gdi32/objects.c:70-79 reads
- * peb64->GdiSharedHandleTable through a 32-bit UINT_PTR cast).
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
+ */
+
+/* Wraps wine/dlls/win32u/syscall.c and adds win32u_zero_bits().
  *
- * On Madeira every Windows process is a pseudo-process -- a thread inside ONE
- * Mach task, sharing ONE win32u instance -- so a "process global" is really
- * TASK-global and is wrong for every process except the one that wrote it:
+ * Upstream win32u keeps one process global, `zero_bits`, set at unix-library
+ * init when the process has a WoW64 TEB, and passes it to every allocation
+ * whose address 32-bit code will see (the DC_ATTR buckets, DIB sections,
+ * message return buffers, Vulkan mappings).  On iOS every Windows process is a
+ * pseudo-process inside one Mach task sharing one win32u, so that global is
+ * really task-wide and wrong for every process except the one that wrote it:
+ * a 32-bit process leaves a sub-4 GB ceiling behind for later 64-bit ones, and
+ * a cleared global hands 32-bit code host pointers it truncates.
  *
- *   - 32-bit process first: the global stays set after it exits, so every
- *     later 64-bit pseudo-process allocates with a low-2GB ceiling it can
- *     never satisfy on iOS (`[va-scan] FAILED window=0x10000..0x80000000 ...
- *     STATUS_NO_MEMORY`) -- explorer's dialogs got no window surface.
- *   - Global cleared (the ml750 change this file used to make): a 32-bit
- *     pseudo-process then receives raw HOST pointers, and the truncation above
- *     produces a guest address that FEX rebases into the window at B + low32,
- *     which is unmapped -- `[mach_exc] UNHANDLED pc=... addr=0x7138c9057e`
- *     inside i386 gdi32!get_gdi_client_ptr.
+ * win32u_zero_bits() therefore answers for the CALLING pseudo-process:
  *
- * Both are the same root cause, so neither value can be right for everyone.
- * `zero_bits` is therefore DEAD on iOS (kept at 0 so a missed call site fails
- * the safe way for the 64-bit majority) and every consumer calls
- * win32u_zero_bits(), which answers for the CALLING pseudo-process:
+ *     WoW64 thread (WowTebOffset != 0) -> HighestUserAddress | 0x7fffffff, a
+ *         GUEST ceiling that the ntdll unix side translates into the process's
+ *         guest window;
+ *     otherwise                          -> 0, the upstream value for a 64-bit
+ *         process.
  *
- *     wow (WowTebOffset != 0) -> HighestUserAddress | 0x7fffffff   (a GUEST
- *         ceiling, which build/ntdll-unix/virtual_ios.c's
- *         ios_wow_translate_limits() turns into [B+floor, B+ceiling])
- *     otherwise               -> 0
- *
- * The ceiling is cached per (pid, peb) -- the key class_ios.c's builtin-class
- * registry already uses, so a recycled PEB address cannot answer for a dead
- * process -- plus a per-thread fast path.
- *
- * NOTE the companion rule in gdiobj.c: the GDI shared table itself must NOT be
- * allocated with a guest ceiling even when the process that first initialises
- * win32u is 32-bit.  It is session-wide state, while a guest window is torn
- * down and replaced with PROT_NONE when its 32-bit pseudo-process exits.  The
- * master table stays at a host address for the life of the session and each
- * 32-bit pseudo-process gets a second VIEW of it inside its own window.
+ * Wine's win32u calls it through caller_zero_bits() (win32u_private.h).  The
+ * answer is cached per (pid, PEB), plus a per-thread fast path, and the task
+ * global is kept at 0 so any remaining reader behaves as a 64-bit process.
  */
 
 #include <stdio.h>
@@ -58,17 +48,10 @@
 #include <pthread.h>
 
 /* Compile upstream syscall.c with its init entry point renamed, then wrap it.
- * build.sh already maps __wine_unix_lib_init -> win32u_unix_lib_init; this
- * pushes that one step further so the wrapper below can own the real name. */
+ * build.sh already maps __wine_unix_lib_init -> win32u_unix_lib_init. */
 #define win32u_unix_lib_init win32u_unix_lib_init_upstream
 #include "../../wine/dlls/win32u/syscall.c"
 #undef win32u_unix_lib_init
-
-/***********************************************************************
- *           win32u_zero_bits
- *
- * The allocation ceiling of the CALLING pseudo-process.  See the file header.
- */
 
 struct ios_zero_bits_entry
 {
@@ -86,27 +69,18 @@ static pthread_mutex_t ios_zero_bits_lock = PTHREAD_MUTEX_INITIALIZER;
 static __thread void      *ios_zero_bits_cached_peb;
 static __thread ULONG_PTR  ios_zero_bits_cached;
 
-static ULONG_PTR ios_compute_zero_bits( void *peb, DWORD pid )
+static ULONG_PTR ios_compute_zero_bits(void)
 {
     SYSTEM_BASIC_INFORMATION info;
-    ULONG_PTR high = 0, value;
+    ULONG_PTR high = 0;
 
-    if (!NtCurrentTeb()->WowTebOffset) value = 0;
-    else
-    {
-        if (!NtQuerySystemInformation( SystemEmulationBasicInformation, &info, sizeof(info), NULL ))
-            high = (ULONG_PTR)info.HighestUserAddress;
-        /* A sane answer is a GUEST address below 4 GB.  Anything else (query
-         * failure, or a host-sized limit leaking out of a session global) must
-         * not escape as a ceiling: >= 4 GB would be taken for a host address
-         * and skip the window translation entirely, so fall back to the
-         * conservative 2 GB guest ceiling. */
-        value = (high && high < ((ULONG_PTR)1 << 32)) ? (high | 0x7fffffff) : 0x7fffffff;
-    }
-
-    dprintf( 2, "[zero-bits] peb=%p pid=%04x wow=%d ceiling=%#lx\n",
-             peb, (int)pid, NtCurrentTeb()->WowTebOffset ? 1 : 0, (unsigned long)value );
-    return value;
+    if (!NtCurrentTeb()->WowTebOffset) return 0;
+    if (!NtQuerySystemInformation( SystemEmulationBasicInformation, &info, sizeof(info), NULL ))
+        high = (ULONG_PTR)info.HighestUserAddress;
+    /* A sane answer is a GUEST address below 4 GB.  Anything else must not
+     * escape as a ceiling: >= 4 GB would be taken for a host address and skip
+     * the window translation, so fall back to the 2 GB guest ceiling. */
+    return (high && high < ((ULONG_PTR)1 << 32)) ? (high | 0x7fffffff) : 0x7fffffff;
 }
 
 ULONG_PTR win32u_zero_bits(void)
@@ -117,6 +91,8 @@ ULONG_PTR win32u_zero_bits(void)
     int i;
 
     if (ios_zero_bits_cached_peb == peb) return ios_zero_bits_cached;
+    /* a 64-bit thread needs no registry: its answer is always 0 */
+    if (!NtCurrentTeb()->WowTebOffset) return 0;
 
     pid = HandleToULong( NtCurrentTeb()->ClientId.UniqueProcess );
 
@@ -127,7 +103,7 @@ ULONG_PTR win32u_zero_bits(void)
     if (i < ios_zero_bits_count) ret = ios_zero_bits_reg[i].zero_bits;
     else
     {
-        ret = ios_compute_zero_bits( peb, pid );
+        ret = ios_compute_zero_bits();
         if (ios_zero_bits_count < IOS_MAX_ZERO_BITS_PROCS)
         {
             ios_zero_bits_reg[i].pid       = pid;
@@ -135,18 +111,10 @@ ULONG_PTR win32u_zero_bits(void)
             ios_zero_bits_reg[i].zero_bits = ret;
             ios_zero_bits_count = i + 1;
         }
-        else
-        {
-            static int warned;
-            if (!warned++)
-                dprintf( 2, "[zero-bits] registry FULL (%d processes) — recomputing per call\n",
-                         IOS_MAX_ZERO_BITS_PROCS );
-        }
     }
     pthread_mutex_unlock( &ios_zero_bits_lock );
 
-    /* only cache what the registry vouches for, so a full registry keeps
-     * answering from a fresh query instead of pinning a stale value */
+    /* only cache what the registry vouches for */
     if (i < IOS_MAX_ZERO_BITS_PROCS)
     {
         ios_zero_bits_cached     = ret;
@@ -159,16 +127,7 @@ NTSTATUS win32u_unix_lib_init(void)
 {
     NTSTATUS status = win32u_unix_lib_init_upstream();
 
-    /* The task-global is dead here; win32u_zero_bits() answers per
-     * pseudo-process.  Keep it at 0 so that any call site that still reads it
-     * behaves like a 64-bit process (which is the common case and the only one
-     * for which a host address is right). */
-    if (zero_bits)
-    {
-        dprintf( 2, "[zero-bits] win32u unix init: dropping the task-global ceiling %#lx — "
-                    "every consumer now asks win32u_zero_bits() for the calling "
-                    "pseudo-process\n", (unsigned long)zero_bits );
-        zero_bits = 0;
-    }
+    /* the task global is dead here: every consumer asks win32u_zero_bits() */
+    zero_bits = 0;
     return status;
 }

@@ -46,7 +46,10 @@ Keyboard/mouse mappings and the existing layout format are retained.
 ## Layouts
 
 While touch controls are shown, the landscape top bar has a layout button
-(stacked squares) next to the show/hide controller glyph. It lists:
+(stacked squares) next to the show/hide controller glyph. In a library session
+that top bar is replaced by the library's menu button, and the same menu is the
+**Controller layout** row of the in-game **Session** menu, below **Touch
+controls** (`docs/LIBRARY.md`). Either one lists:
 
 - **Xbox controller**, a built-in full XInput layout: LT/LB and RB/RT rows in the
   top corners, a D-pad cross above the left stick, the A/B/X/Y diamond above the
@@ -60,6 +63,16 @@ While touch controls are shown, the landscape top bar has a layout button
 - **Delete** for the active custom layout (confirmed first). The deleted
   layout's controls are replaced by the built-in, when it is available.
 
+A library game remembers the layout its controls were loaded from (an optional
+`controlLayout` field of its library entry, so older files still load; a layout
+deleted since is treated as none), and the session restores the shared layout
+when it ends. A game with no saved controls of its own draws the shared working
+copy, as before.
+
+The two key sticks, WASD and Arrows, draw a small symbol on the knob in the
+middle of the stick (a keyboard, and four arrows) so they can be told apart; the
+controller sticks keep their LS/RS label.
+
 Built-ins cannot be changed. Custom layouts live in
 Documents/madeira-control-presets.json; madeira-controls.json stays the working
 copy the overlay draws and records which layout it came from (an optional
@@ -69,9 +82,14 @@ shipped: the edited controls become unsaved controls. Choosing another layout
 while unsaved controls are on screen asks first and offers to keep them as the
 next custom layout, so an existing hand-made layout is never lost.
 
-A new user, meaning no madeira-controls.json at launch, gets the built-in the
-first time the landscape overlay appears. It is never applied over an existing
-controls file, even an empty one.
+The built-in is never applied automatically by default: it is only loaded
+when chosen from the menu. A missing madeira-controls.json does not identify a
+new user (the file is only written once the controls or their visibility
+change, so an existing user who never touched them has none either), and
+nothing else on disk tells the two apart reliably. With
+`env.MADEIRA_CONTROLS_XBOX_DEFAULT = 1`, a user with no madeira-controls.json
+at launch gets the built-in the first time the landscape overlay appears; it is
+never applied over an existing controls file, even an empty one.
 
 The editor shows **Done** in place of the checkmark and hides the show/hide
 glyph while editing; **+** still adds a control. Menus and confirmation dialogs
@@ -83,11 +101,16 @@ Some input layers enumerate XInput once when a game starts and only look again
 on a device-arrival broadcast, which this port cannot deliver. Touch player 1
 connects only once the landscape overlay shows its controller mappings, and a
 paired controller may not have reported an extended profile yet, so such a game
-would never see a pad. When a Wine session starts with visible touch controller
-mappings (or a new user's built-in layout about to be applied) or with a paired
+would never see a pad.
+
+This is **opt-in** (`env.MADEIRA_PAD_EARLY_SLOT = 1`), because the reserved
+player 1 stays connected for the whole session. With the switch, when a Wine
+session starts with visible touch controller mappings (or the built-in about
+to be applied by `MADEIRA_CONTROLS_XBOX_DEFAULT = 1`) or with a paired
 controller, slot 0 is published as connected with neutral input. Live touch or
 physical input takes it over. Hiding the controls or disconnecting the pad then
-leaves player 1 connected at rest until the app exits.
+leaves player 1 connected at rest until the app exits. Without the switch,
+slot 0 connects only when a real source appears, as before.
 
 ## Audio route with wired controllers
 
@@ -103,15 +126,16 @@ whole producer and controller event claims. Set `env.MADEIRA_TOUCH_XINPUT = 0`
 to disable only touch gamepad input. `[xinput] ml1920` logs physical enablement
 and connections; `[touch-xinput] ml1930` logs touch enablement once.
 
-Each follow-up behaviour has its own switch (`env.NAME = 0` in madeira.cfg, or
-the process environment; only `0` disables):
+Each follow-up behaviour has its own switch (`env.NAME = value` in
+madeira.cfg, or the process environment). The two that change what an existing
+user sees are opt-in (only `1` enables); the others are on unless set to `0`:
 
-| Switch | Default | `0` restores |
+| Switch | Default | Effect |
 | --- | --- | --- |
-| `MADEIRA_CONTROL_PRESETS` | on | no layout menu, no default layout, no write-back |
-| `MADEIRA_CONTROLS_XBOX_DEFAULT` | on | new users start with no controls |
-| `MADEIRA_CONTROLS_EDITOR_DONE` | on | the checkmark and show/hide glyph while editing |
-| `MADEIRA_PAD_EARLY_SLOT` | on | slot 0 connects only when a source appears |
+| `MADEIRA_CONTROL_PRESETS` | on | `0`: no layout menu, no write-back |
+| `MADEIRA_CONTROLS_EDITOR_DONE` | on | `0`: the checkmark and show/hide glyph while editing |
+| `MADEIRA_CONTROLS_XBOX_DEFAULT` | **off** | `1`: a user with no controls file gets the built-in once |
+| `MADEIRA_PAD_EARLY_SLOT` | **off** | `1`: player 1 is reserved at session start (see above) |
 
 `[controls-layout] ml1970` logs layout loads, saves, creation and deletion
 (never layout names); `[xinput] ml1990` logs the session slot reservation.
@@ -179,11 +203,15 @@ merge, rebuild the paired components and test:
 - Hold then hide, edit, remap, remove, rotate, background or interrupt the app;
   no input should remain stuck, and fresh touches should work afterward.
 - Both rollback flags, saved layouts, and existing keyboard/mouse controls.
-- Layouts: a fresh install gets the built-in once; an existing controls file is
-  kept; switching away from unsaved controls asks first; create, edit with Done,
-  relaunch and reload a custom layout; delete it; the layout menu and its dialogs
-  respond anywhere on screen; each follow-up switch at `0`.
-- A game that enumerates XInput only at startup sees player 1 with touch
-  controls shown or a controller paired before launch.
+- Layouts: by default nothing is applied to a user with or without a controls
+  file; the built-in loads from the menu (the overlay's button, and in a library
+  session the Session menu's Controller layout row); switching away from unsaved controls
+  asks first; create, edit with Done, relaunch and reload a custom layout;
+  delete it; the layout menu and its dialogs respond anywhere on screen; each
+  kill switch at `0`. With `MADEIRA_CONTROLS_XBOX_DEFAULT = 1`: a user without
+  a controls file gets the built-in once and an existing file is kept.
+- By default player 1 is not connected until a real source appears. With
+  `MADEIRA_PAD_EARLY_SLOT = 1`, a game that enumerates XInput only at startup
+  sees player 1 with touch controls shown or a controller paired before launch.
 
 The fork's existing device history does not prove this isolated extraction.

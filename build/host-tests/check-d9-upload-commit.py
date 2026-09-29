@@ -33,6 +33,10 @@ harness = r"""
 #define WARN(...) do {} while (0)
 namespace dxmt {
 namespace env { inline std::string getEnvVar(const char *) { return ""; } }
+// Every Madeira switch reads as unset: DXMT_RING_OVERSIZE_REUSE off, the
+// upstream block lifetime, so only the settle policy differs between runs.
+inline bool madeiraSwitch(const char *) { return false; }
+struct Logger { template <typename... A> static void info(A &&...) {} };
 using mutex = std::mutex;
 inline uint64_t align(uint64_t v, uint64_t a) { return (v + a - 1) & ~(a - 1); }
 """ + body + r"""
@@ -128,7 +132,7 @@ assert "settleUploadPressure" not in function(tex, "MTLD3D9Texture::sweepManaged
 assert "void settleUploadPressure();" in hpp and "m_uploadedBytesSinceCommit = 0;" in hpp
 
 zero = function(init, "ResourceInitializer::allocateZeroBuffer(size_t size) {")
-assert 'getEnvVar("DXMT_ZERO_BUFFER_POW2")' in zero and "length <<= 1;" in zero, "power-of-two growth behind a switch"
+assert 'madeiraSwitch("DXMT_ZERO_BUFFER_POW2")' in zero and "length <<= 1;" in zero, "power-of-two growth behind a switch"
 assert zero.index("mem_census_sub(MEMOWN_INIT_UPLOAD, zero_buffer_census_)") < zero.index("zero_buffer_ = device_.newBuffer"), \
     "the replaced buffer leaves the census"
 print("PASS: settle points are API and draw boundaries only, commits reset the count, zero buffer grows by powers of two")

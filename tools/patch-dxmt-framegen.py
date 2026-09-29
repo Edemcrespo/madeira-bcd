@@ -319,7 +319,8 @@ static int madeira_fg_present(id<MTLCommandBuffer> cb, id<CAMetalDrawable> drawa
 '''
 
 ANCHOR_HOOK = """  /* ml1050: this call IS the frame boundary on the encode thread. */
-  ios_frame_encode_present(0);
+  if (madeira_frame_hooks_on())
+    ios_frame_encode_present(0);
 """
 HOOK = """  /* madeira-bcd: frame generation presents both frames itself. */
   if (mode != 2 && madeira_fg_enabled() &&

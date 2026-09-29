@@ -1918,19 +1918,6 @@ static void *build_wow64_parameters( const RTL_USER_PROCESS_PARAMETERS *params )
 
     status = NtAllocateVirtualMemory( NtCurrentProcess(), (void **)&wow64_params, limit_2g - 1, &size,
                                       MEM_COMMIT, PAGE_READWRITE );
-#ifdef WINE_IOS
-    /* Device-run confirmation (one line): the 2GB ceiling must have been
-     * translated into this process's window, so the params block is host and
-     * in-window.  base=0 here means the window was not reserved for this
-     * pseudo-process and the allocation will fail below (the assert). */
-    {
-        static int reported;
-        if (!reported++)
-            dprintf( 2, "[wow-params] status=0x%x base=%p wow64_params=%p in_window=%d\n",
-                     (unsigned)status, (void *)ios_wow_base(), (void *)wow64_params,
-                     ios_wow_in_window( wow64_params ) );
-    }
-#endif
     assert( !status );
 
     wow64_params->AllocationSize  = size;
@@ -2190,7 +2177,7 @@ static RTL_USER_PROCESS_PARAMETERS *build_initial_params( void **module )
     if (status)  /* try launching it through start.exe */
     {
 #ifdef WINE_IOS
-        /* WOW64_DESIGN.md §2: never punt a 32-bit MAIN IMAGE that failed to map
+        /* never punt a 32-bit MAIN IMAGE that failed to map
          * to the 64-bit launcher.  start.exe is an aarch64 builtin: it boots in
          * THIS pseudo-process, which keeps the guest window it is bound to (the
          * furniture band holds only a couple of 4 GB-aligned slots), so
@@ -2523,8 +2510,8 @@ void *create_startup_info( const UNICODE_STRING *nt_image, ULONG process_flags,
 /**************************************************************************
  *      ios_wow_fixup_peb64_ptrs
  *
- * WOW64_DESIGN.md §3 invariant 2: every pointer the NATIVE side dereferences
- * is a HOST address; §3 invariant 1: every pointer 32-bit code can observe is
+ * Invariants: every pointer the NATIVE side dereferences
+ * is a HOST address, and every pointer 32-bit code can observe is
  * a GUEST address.  init_peb() maintains that split for the fields the unix
  * side owns (peb host / wow_peb guest), but a handful of PEB64 fields are
  * written by the 32-bit ntdll ITSELF, using the classic WoW64 identity
@@ -2537,7 +2524,7 @@ void *create_startup_info( const UNICODE_STRING *nt_image, ULONG process_flags,
  * upstream code we do not fork, so repair the fields on this side instead.
  *
  * The test is exact, not a heuristic: iOS's mandatory 4 GB __PAGEZERO means no
- * host mapping can ever exist below 4 GB (WOW64_DESIGN.md §1), so a non-zero
+ * host mapping can ever exist below 4 GB, so a non-zero
  * PEB64 pointer below 4 GB is necessarily a guest address whose host form is
  * B + value.  One mapping, two views: the NLS sections stay inside the window
  * (the 32-bit ntdll and kernelbase read them through wow_peb), and only the
@@ -2748,8 +2735,8 @@ void WINAPI RtlInitCodePageTable( USHORT *ptr, CPTABLEINFO *info )
 {
     static const CPTABLEINFO utf8_cpinfo = { CP_UTF8, 4, '?', 0xfffd, '?', '?' };
 
-    /* Last line of defence at the point of dereference (WOW64_DESIGN.md §3
-     * invariant 2).  Nothing is ever mapped below iOS's 4 GB __PAGEZERO, so a
+    /* Last line of defence at the point of dereference.
+     * Nothing is ever mapped below iOS's 4 GB __PAGEZERO, so a
      * non-NULL table pointer below 4 GB can only be a GUEST address that
      * reached a native caller unconverted — convert it rather than fault, and
      * say so.  Covers every native NLS consumer (win32u, display drivers), not

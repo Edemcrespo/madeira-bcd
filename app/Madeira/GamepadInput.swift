@@ -27,7 +27,7 @@ final class GamepadInput: @unchecked Sendable {
         queue.async { [self] in touchState.configure(allowed); sample() }
     }
 
-    /// Publish player 1 before the game looks (MADEIRA_PAD_EARLY_SLOT, default on).
+    /// Publish player 1 before the game looks (MADEIRA_PAD_EARLY_SLOT=1; default OFF).
     ///
     /// Some input layers enumerate XInput once at startup and only rescan on a
     /// device-arrival broadcast, which this port does not deliver. Touch slot 0
@@ -36,9 +36,12 @@ final class GamepadInput: @unchecked Sendable {
     /// so such a game never sees a pad. When the session will have a controller
     /// source (touch controller mappings shown, or a controller paired), slot 0
     /// is connected at rest from the start; live input takes it over. The
-    /// reservation lasts until the process exits (one Wine session per run).
+    /// reservation lasts until the process exits (one Wine session per run),
+    /// so player 1 then shows as connected for the whole session even while no
+    /// controller is in use. That is why it is opt-in: without the switch,
+    /// slot 0 connects only when a real source appears, as before.
     @MainActor func reserveSessionSlot(touchControls: Bool) {
-        guard Self.enabled, Self.flag("MADEIRA_PAD_EARLY_SLOT") else { return }
+        guard Self.enabled, Self.optIn("MADEIRA_PAD_EARLY_SLOT") else { return }
         let touch = touchControls && Self.touchEnabled
         let paired = !GCController.controllers().isEmpty
         guard touch || paired else { return }
@@ -49,6 +52,11 @@ final class GamepadInput: @unchecked Sendable {
     /// Documents/madeira.cfg `env.NAME`, else the process environment; only "0" disables.
     static func flag(_ name: String) -> Bool {
         (MadeiraConfig.get("env.\(name)") ?? ProcessInfo.processInfo.environment[name]) != "0"
+    }
+
+    /// The same sources, for behaviour that is off by default: only "1" enables.
+    static func optIn(_ name: String) -> Bool {
+        (MadeiraConfig.get("env.\(name)") ?? ProcessInfo.processInfo.environment[name]) == "1"
     }
 
     @MainActor func touch(owner: UUID, control: UUID, value: GamepadSample?) {
@@ -188,6 +196,17 @@ final class GamepadInput: @unchecked Sendable {
                 state.ly = Self.axis(pad.leftThumbstick.yAxis.value)
                 state.rx = Self.axis(pad.rightThumbstick.xAxis.value)
                 state.ry = Self.axis(pad.rightThumbstick.yAxis.value)
+                // The library front end navigates with player 1's pad (Library.swift).
+                // While it owns input (no session, or its menu is open) the game
+                // sees a connected pad at rest.
+                if i == 0 {
+                    let library = LibraryController.shared
+                    library.sample(buttons: state.buttons, lx: state.lx, ly: state.ly)
+                    if library.ownsInput {
+                        state = winios_gamepad()
+                        state.connected = 1
+                    }
+                }
             }
             if active && touchConnected {
                 let physical = GamepadSample(buttons: state.buttons,

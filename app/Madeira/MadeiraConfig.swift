@@ -72,23 +72,33 @@ enum MadeiraConfig {
         return ["1", "on", "true", "yes"].contains(v)
     }
 
-    /// A runtime kill switch read on the Swift side, spelled like the native
-    /// ones: `env.NAME = 0` in madeira.cfg (or `NAME=0` in madeira-env.txt when
-    /// there is no madeira.cfg), else the process environment, else `fallback`.
-    /// Any value other than "0" means on. The same line is also exported to the
-    /// guest by WineProcessBridge, so one switch covers both halves.
-    static func flag(_ name: String, fallback: Bool = true) -> Bool {
-        if present {
-            if let v = all()["env." + name] { return v != "0" }
-        } else if let d = documents,
-                  let text = try? String(contentsOf: d.appendingPathComponent("madeira-env.txt"), encoding: .utf8) {
-            for raw in text.split(whereSeparator: { $0.isNewline }).reversed() {
-                let line = raw.trimmingCharacters(in: .whitespaces)
-                guard !line.hasPrefix("#"), let eq = line.firstIndex(of: "="),
-                      line[..<eq].trimmingCharacters(in: .whitespaces) == name else { continue }
-                return line[line.index(after: eq)...].trimmingCharacters(in: .whitespaces) != "0"
-            }
+    /// Set or remove one key in madeira.cfg (Settings). Comments and every
+    /// other line are kept; earlier lines for the key are dropped and the new
+    /// value is appended; a nil value removes the key. Without madeira.cfg the
+    /// legacy files are migrated first, so writing one key never hides the
+    /// switches that still live in madeira-*.txt files.
+    @discardableResult
+    static func set(_ key: String, _ value: String?) -> Bool {
+        guard let u = url else { return false }
+        if !present { migrateLegacy(log: { _ in }) }
+        let text = (try? String(contentsOf: u, encoding: .utf8)) ?? ""
+        var lines = text.split(omittingEmptySubsequences: false, whereSeparator: { $0 == "\n" || $0 == "\r\n" }).map(String.init)
+        if lines.last == "" { lines.removeLast() }
+        lines.removeAll { line in
+            let t = line.trimmingCharacters(in: .whitespaces)
+            guard !t.hasPrefix("#"), let eq = t.firstIndex(of: "=") else { return false }
+            return t[..<eq].trimmingCharacters(in: .whitespaces) == key
         }
+        if let value { lines.append("\(key) = \(value)") }
+        let out = lines.joined(separator: "\n") + (lines.isEmpty ? "" : "\n")
+        do { try out.write(to: u, atomically: true, encoding: .utf8); return true } catch { return false }
+    }
+
+    /// An app-side switch spelled like the native ones: `env.NAME = value` in
+    /// madeira.cfg, else the process environment, else `fallback`. Any value
+    /// other than "0" means on.
+    static func flag(_ name: String, fallback: Bool = true) -> Bool {
+        if present, let v = all()["env." + name] { return v != "0" }
         return getenv(name).map { String(cString: $0) != "0" } ?? fallback
     }
 
@@ -150,30 +160,5 @@ enum MadeiraConfig {
         }
         if !removed.isEmpty { log("removed legacy config files (madeira.cfg is the one file now): " + removed.joined(separator: ", ")) }
         return removed
-    }
-
-    /// Sets `key` to `value` in madeira.cfg (nil removes it), creating the file
-    /// if needed. Earlier lines for the key are dropped rather than shadowed, so
-    /// the file stays readable by hand. When the file is first created any
-    /// legacy madeira-*.txt switches are carried over first -- creating
-    /// madeira.cfg is what makes the native side stop reading them.
-    static func set(_ key: String, _ value: String?) {
-        guard let u = url else { return }
-        if !present { migrateLegacy { _ in } }
-        var lines: [String] = []
-        if let text = try? String(contentsOf: u, encoding: .utf8) {
-            lines = text.components(separatedBy: "\n")
-            while lines.last == "" { lines.removeLast() }
-        } else {
-            lines = ["# Madeira configuration (ml1095): one file for every switch.",
-                     "# key = value; lines starting with # are comments; the last line wins.", ""]
-        }
-        lines.removeAll { raw in
-            let line = raw.trimmingCharacters(in: .whitespaces)
-            guard !line.hasPrefix("#"), let eq = line.firstIndex(of: "=") else { return false }
-            return line[..<eq].trimmingCharacters(in: .whitespaces) == key
-        }
-        if let value { lines.append("\(key) = \(value)") }
-        try? (lines.joined(separator: "\n") + "\n").write(to: u, atomically: true, encoding: .utf8)
     }
 }
