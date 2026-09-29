@@ -698,6 +698,15 @@ tracked DLL and stay green).
   `env.WINEDEBUG = err+all,err-virtual,fixme-all` in the game's config.
   Candidate follow-up (dxmt, IPA): a larger auto threshold or a footprint
   trend trigger.
+* Third run (13:11) with both lines: gameplay reached (a few axe swings),
+  textures 4051 -> 1050 MB, Metal total ~1.7 GB, log 5 MB. The footprint
+  still climbs to ~8.0 GB and sits at the limit for 2+ minutes (compressed
+  3.2 GB) before jetsam. Not a leak: the game's own RAM is the rest. The swap
+  tier (swap-mb 3072) already backs its big blocks (~1.6 GB), but
+  `ios_swap_eligible` refuses commits under 8 MB, outside [0x70,0x7c), or not
+  entirely fresh. Next without a build: mipClampBC=2 plus lower in-game
+  settings. With a build: a madeira.cfg knob for the swap floor (e.g. 1 MB)
+  and a breakdown of the footprint by region kind.
 * Far Cry 5 (D3D11): it gets past the loading screen to a black window
   (d3d11/dxgi/winemetal loaded, no device created yet). ~50 first-chance
   write faults on read-only pages are handled (protection layer). Right after
