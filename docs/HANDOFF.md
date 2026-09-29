@@ -678,6 +678,25 @@ tracked DLL and stay green).
   build and never lost the old ones; entries of earlier builds are removed
   once per build (log: `DXBC shader cache: removed N entries`).
 
+### Build 220 device results (God of War, logs 2026-09-29 14:42 / 14:54)
+* Frame generation works: `[framegen]` generated a frame for every real one,
+  HUD 40 FPS shown / 20 rendered, "Frame Interpolator Enabled". Costly: GPU
+  8-10 -> 23-33 ms per frame, and the game waits ~29 ms per frame for a
+  drawable (two presents per game frame on a 3-drawable pool), so the real
+  rate fell from ~30 to ~20.
+* The MetalFX output was 2084x960 (2x), not 1563x720, although DXMT logged
+  `d3d11.metalSpatialUpscaleFactor=1.5`. The source reads it as a float, but
+  the committed d3d11.dll may predate that, so 1.5 is not honoured. As a
+  result the interpolator ran at 2 MP. Fix candidates: a factor-2 "fill"
+  size (782x360 -> 1564x720), or MetalFX + interpolation in winemetal
+  itself (the descriptor's `scaler` property lets the interpolator work at
+  the scaler's input size).
+* In-game: FSR 2 Ultra Performance was on (render 428x240 for a 1042x480
+  output); Performance costs RAM; FSR off runs out of memory. With FG,
+  ~280-300 MB stayed free. The VMCENSUS/totalphys run has not been sent yet.
+* 14:54:09: the log stops at "Starting God of War" (22 lines): the app died at
+  launch, cause unknown.
+
 ### Build 220: frame generation, "Fill with MetalFX 1.5x" (2026-09-29)
 * God of War with build 219 + the four config lines: 10+ minutes of play
   (log 13:48). Swap tier 2.1 GB file-backed; `turned away`: under 1 MB
