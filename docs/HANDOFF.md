@@ -703,6 +703,14 @@ our per-game options inside upstream's game page, every upstream feature.
   "Screen shape for MetalFX 1.5x"; FPS picker: 40 FPS. Long press: Play /
   Game settings. Settings > Interface > "Add every game in drive_c".
   Shortcuts (madeira://play) start the library entry in library mode.
+* Builds 222-224 failed on leftovers of 125hz's series: a brace lost in
+  the virtual_ios.c re-apply, an SDK field in server_ios.c, 125hz's DXMT/nsi
+  PE DLLs, Swift calls into 125hz's removed cursor helpers, and 125hz's
+  fastsync wineserver/bridge sources (9 undefined symbols at link). Every
+  file only 125hz had changed since the base now equals upstream (or is gone).
+  Still 125hz's on purpose, because they build and link against upstream:
+  app-side JIT pool handling (JITAllocator, StikJITHelper, the ml1330 early
+  pool in ContentView) and sysparams_ios.c's weak diagnostics hooks.
 * RDR2: upstream has no separate RDR2 package; its RDR2 bring-up lives in
   the runtime we merged (ntdll-unix, madeira_d3d12, the converter service,
   swap tier), plus `research/HANDOFF-rdr2-arm64ec-hooks.md`.
