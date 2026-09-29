@@ -110,7 +110,38 @@ Upstream PRs merged into the fork (not yet merged upstream):
   use tokens from chat. A signing `.p12` (+password) and `.mobileprovision`
   were shared read-only; never commit or use them.
 
-## 4. Current focus: Ghost of Tsushima (D3D12, Nixxes port)
+## 4. Ghost of Tsushima (D3D12, Nixxes port) -- PAUSED 2026-09-29
+
+### Where it stands (owner paused GoT on 2026-09-29; resume from here)
+State: IPA 218 (native ABI 48a89bc6c3cadd93) + pack 6 (68e4735). Playable in
+gameplay at ~35-45 FPS at 1280x720 with FSR3 Performance. Open items, in order:
+1. **C++ exception fast-fail (0xC0000409), the main stability blocker.** It
+   happens during loading and in gameplay (logs 09-28 18:53, 20:41; also
+   builds 187 and 191). The stack is always the same: GhostOfTsushima+0x449681
+   (recursive), +0x40a99d, VCRUNTIME140_1 frame handler, and the handler
+   thunk +0xd15f0c ends in __fastfail. It is not the device list race
+   (pack 5 did not change it). Hypothesis: during C++ exception dispatch
+   through x64 frames under ARM64EC/FEX, the unwinder or dispatcher context
+   (ControlPc / ImageBase / state) is wrong, so __CxxFrameHandler4 reaches
+   terminate. Next step is native, so an IPA: log the DISPATCHER_CONTEXT of
+   every frame for code e06d7363, and whether `_ThrowImageBase` is 0 (see
+   "Build 191 results").
+2. **Rendering corruption the owner calls "objelerdeki sıkıntı".** It must be
+   re-checked with pack 6 in a session where F0 is NEVER used: every earlier
+   observation after an F0 test was polluted (see "Pack 6"). If it remains,
+   press CAP while it is on screen. The leading suspect is the velocity target
+   (RG16F, NaN/Inf over the sky in older captures) feeding FSR3/TAA. FSR3
+   Performance's jagged edges are expected (internal ~640x360); with FSR off
+   the edges are clean but the corruption stays, and FPS drops a lot (GPU-bound
+   at native 720p).
+3. Performance: in steady gameplay the game's own CPU time under emulation
+   dominates (~18 of ~25 ms). Our D3D12 layer costs 4-6 ms: encode 0.7,
+   encoder open/end 1.8, the rest is the replay. async-submit=1 takes that
+   off the game thread, but the worker sits at ~16 ms per frame; re-measure
+   on a cool phone. F5 measured +2-3 FPS over F1 (owner, 09-28), which makes
+   it a candidate per-game default.
+4. Hitches of 50-550 ms are first-draw pipeline compiles (pso-lazy); the
+   shader cache removes them on the next visit.
 
 ### Progress so far (each item is a commit; details in docs/madeira-bcd.md)
 Save folder -> D3D12 use-after-free -> display config crash -> GPU driver info
@@ -646,6 +677,22 @@ tracked DLL and stay green).
 * The unix DXBC cache (`Documents/shadercache/*.mdsc`) got a fresh set per
   build and never lost the old ones; entries of earlier builds are removed
   once per build (log: `DXBC shader cache: removed N entries`).
+
+### Other games tried 2026-09-29 (IPA 218 + pack 5)
+* God of War (2018, D3D11): the owner started
+  `C:\God of War\_Windows 7 Fix\dxvk-1.10.1\GoW.exe`, a copy inside a
+  DXVK "Windows 7 fix" folder. Its DLLs (libScePad, libSceJobManager,
+  bink2w64, libSceGnm, libSceGpuAddress) are not next to it, so the loader
+  stops with 0xC0000135 before any frame. Start the game's own GoW.exe in
+  the install root instead. DXVK itself is Vulkan and cannot run here: DXMT
+  is the D3D11 path, so do not use the DXVK DLLs.
+* Far Cry 5 (D3D11): it gets past the loading screen to a black window
+  (d3d11/dxgi/winemetal loaded, no device created yet). ~50 first-chance
+  write faults on read-only pages are handled (protection layer). Right after
+  `EasyAntiCheat_x64.dll` (a 52 KB module from the game folder) loads and its
+  TLS callbacks run, FC_m64.dll+0xe0a5d68 calls through a NULL pointer
+  (AV EXEC of 0) and the game exits with 0xC0000005. Anti-cheat modules do
+  not work in this environment; not investigated further.
 
 ### Pack 6: F0 no longer poisons the session (logs and videos 2026-09-28 20:35-20:41, pack 5)
 * Videos matched to the 20:35 log through the HUD frame number (roughly the
