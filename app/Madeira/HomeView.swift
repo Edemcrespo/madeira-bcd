@@ -256,8 +256,9 @@ enum LibraryPrefs {
     private static let safeSyncKey = "madeira.library.safeSync"
     private static let screenKey = "madeira.library.screen"
     /// Per-game virtual monitor sizes; "" = default (1024x768), "fill" = the
-    /// device's own landscape shape at 720 lines (experimental).
-    static let screenSizes = ["", "1280x720", "fill", "1600x900", "1920x1080"]
+    /// device's own landscape shape at 720 lines (experimental), "fill-mfx15" =
+    /// the same shape at 480 lines, which MetalFX 1.5x brings back to "fill".
+    static let screenSizes = ["", "1280x720", "fill", "fill-mfx15", "1600x900", "1920x1080"]
 
     static func screenLabel(_ value: String) -> String {
         switch value {
@@ -265,6 +266,9 @@ enum LibraryPrefs {
         case "fill":
             let s = screenPixels(value)
             return "Fill the screen, \(s.0)x\(s.1) (experimental)"
+        case "fill-mfx15":
+            let s = screenPixels(value), f = screenPixels("fill")
+            return "Fill with MetalFX 1.5×, \(s.0)x\(s.1) → \(f.0)x\(f.1) (experimental)"
         default: return value
         }
     }
@@ -272,6 +276,12 @@ enum LibraryPrefs {
     /// "fill": 720 lines at the panel's aspect (iPhone 17 Pro Max 2868x1320 ->
     /// 1564x720), so the picture needs no pillarbox. Width kept even.
     static func screenPixels(_ value: String) -> (Int, Int) {
+        if value == "fill-mfx15" {
+            // The fill width / 1.5 at 480 lines, even: 1564x720 -> 1042x480,
+            // which MetalFX's 1.5x scale turns back into (about) 1564x720.
+            let f = screenPixels("fill")
+            return (max(640, Int((Double(f.0) / 1.5 / 2).rounded(.down)) * 2), 480)
+        }
         guard value == "fill" else { return ContentView.desktopSize(value) }
         let n = UIScreen.main.nativeBounds.size
         let long = max(n.width, n.height), short = min(n.width, n.height)
@@ -974,6 +984,7 @@ struct GameSettingsSheet: View {
     @State private var tess: String
     @State private var submit: String
     @State private var gpuSync: String
+    @State private var frameGen: String
     @State private var photo: PhotosPickerItem?
     @State private var tick = 0
     @State private var copiedLink = false
@@ -998,6 +1009,7 @@ struct GameSettingsSheet: View {
         _tess = State(initialValue: profile.get("dxil-tess-max-factor") ?? "")
         _submit = State(initialValue: profile.get("async-submit") ?? "")
         _gpuSync = State(initialValue: profile.get("fence-chain") ?? "")
+        _frameGen = State(initialValue: profile.get("env.MADEIRA_FRAMEGEN") ?? "")
     }
 
     private var profile: GameProfile { GameProfile(windowsPath: exePath) }
@@ -1008,6 +1020,7 @@ struct GameSettingsSheet: View {
         tess = profile.get("dxil-tess-max-factor") ?? ""
         submit = profile.get("async-submit") ?? ""
         gpuSync = profile.get("fence-chain") ?? ""
+        frameGen = profile.get("env.MADEIRA_FRAMEGEN") ?? ""
     }
 
     /// A picker over (value, label) pairs that also shows a value typed into the raw file.
@@ -1121,6 +1134,10 @@ struct GameSettingsSheet: View {
                         }
                     }
                     .disabled(inDesktop)
+                    // madeira-bcd: the 480-line size is meant for MetalFX 1.5x.
+                    .onChange(of: screen) { _, size in
+                        if size == "fill-mfx15" && metalFX.isEmpty { metalFX = "1.5" }
+                    }
                 } header: {
                     Text("Launch options")
                 } footer: {
@@ -1211,7 +1228,10 @@ struct GameSettingsSheet: View {
 
     private static let graphicsFooter = """
         MetalFX upscaling renders at the screen size above and sharpens the picture up to 1.5× or 2× with \
-        Apple's scaler, so a small screen size (960x540, 1280x720) for frame rate still looks crisp. FPS limit \
+        Apple's scaler, so a small screen size (960x540, 1280x720) for frame rate still looks crisp. Frame \
+        generation (experimental) shows a MetalFX-interpolated frame between every two game frames: twice the \
+        frames on screen for half a frame of latency; edges and the HUD may shimmer, and FPS caps do not apply \
+        while it is on. FPS limit \
         at start is the cap the session opens with; 30 or 40 keeps the frame rate even when the phone warms up. \
         Tessellation detail caps the D3D12 runtime's low-detail tessellation (particles, grass); Full costs GPU \
         time. Command encoding on a worker thread takes the D3D12 runtime's own work off the game's render \
@@ -1227,6 +1247,7 @@ struct GameSettingsSheet: View {
     private var graphicsSection: some View {
         Section {
             choicePicker("MetalFX upscaling", $metalFX, GameProfile.metalFXChoices)
+            choicePicker("Frame generation", $frameGen, GameProfile.frameGenChoices)
             choicePicker("FPS limit at start", $fpsLimit, GameProfile.fpsChoices)
             choicePicker("Tessellation detail (D3D12)", $tess, GameProfile.tessChoices)
             choicePicker("D3D12 command encoding", $submit, GameProfile.submitChoices)
@@ -1274,6 +1295,7 @@ struct GameSettingsSheet: View {
         if p.get("dxil-tess-max-factor") ?? "" != tess { p.set("dxil-tess-max-factor", tess) }
         if p.get("async-submit") ?? "" != submit { p.set("async-submit", submit) }
         if p.get("fence-chain") ?? "" != gpuSync { p.set("fence-chain", gpuSync) }
+        if p.get("env.MADEIRA_FRAMEGEN") ?? "" != frameGen { p.set("env.MADEIRA_FRAMEGEN", frameGen) }
     }
 }
 

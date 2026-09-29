@@ -678,6 +678,23 @@ tracked DLL and stay green).
   build and never lost the old ones; entries of earlier builds are removed
   once per build (log: `DXBC shader cache: removed N entries`).
 
+### Build 220: frame generation, "Fill with MetalFX 1.5x" (2026-09-29)
+* God of War with build 219 + the four config lines: 10+ minutes of play
+  (log 13:48). Swap tier 2.1 GB file-backed; `turned away`: under 1 MB
+  0.7 GB, outside the guest band 11.9 GB (cumulative; mostly FEX's per-thread
+  arenas at 0x7c.., which must stay anonymous: CpuStateFrame at +0x1140, see
+  ml181), partly committed 0.1 GB. Textures 572 MB, Metal total 1.46 GB,
+  footprint ~7.6 GB with 3.3-3.7 GB compressed. ~28-44 FPS, game CPU
+  22-28 ms/frame, GPU 8-10 ms: GPU has room; memory limits resolution.
+  Next memory step: one run with `env.MADEIRA_VMCENSUS = 1` for the
+  per-band breakdown; `totalphys = 6144` to see if the game sizes its
+  caches down.
+* Frame generation (docs/madeira-bcd.md, App): first device test pending.
+  Unknowns: motion vector scale/sign semantics, whether BGRA8 is accepted,
+  pacing with the drawable pool. `[framegen]` lines say which.
+* SDK probe workflow (.github/workflows/sdk-probe.yml): CI has Xcode 26.3 /
+  iOS SDK 26.2; MTLFXFrameInterpolator.h was read from there.
+
 ### Build 219: swap floor knob (2026-09-29, run 36554968715, native ABI d22451074a1a1504)
 * `swap-min-kb` (madeira.cfg or a game's config) lowers the swap tier's 8 MB
   eligibility floor; `[swap] ml1077 stats` prints every third heartbeat with

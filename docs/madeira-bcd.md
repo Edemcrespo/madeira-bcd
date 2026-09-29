@@ -586,6 +586,20 @@ already did.
   backed). A game's config can also raise `swap-mb`. Every third heartbeat
   prints `[swap] ml1077 stats` with the MB turned away by reason: under the
   floor, outside the guest band, not plain valloc, partly committed.
+- Frame generation (experimental, game sheet > Frame generation, i.e.
+  `env.MADEIRA_FRAMEGEN = 1` in the game's config; tools/patch-dxmt-framegen.py):
+  winemetal's present path copies each drawable into a history texture (the
+  layer becomes framebufferOnly = NO), estimates motion by block matching on
+  1/8-size luma (the game gives no motion vectors), runs MetalFX's
+  MTLFXFrameInterpolator (iOS 26) on the previous and current frame with that
+  motion and a flat depth, and presents the generated frame at once and the
+  real one half a frame later. Twice the frames on screen, half a frame of
+  latency; FPS caps are bypassed while it is on. Knobs: MADEIRA_FRAMEGEN_RADIUS
+  (search radius in 1/8 px, default 6), MADEIRA_FRAMEGEN_MVSCALE (default 1),
+  MADEIRA_FRAMEGEN_MVSIGN (-1 flips the vectors). Log: `[framegen]`.
+- Screen size "Fill with MetalFX 1.5x": the panel's shape at 480 lines
+  (1042x480 on a 17 Pro Max), which MetalFX 1.5x brings to about 1564x720;
+  picking it sets MetalFX 1.5x when MetalFX was off.
 - Bundle identifier `com.willfaust.mythicemu`, so an installed copy keeps its
   container (Wine prefix, library, covers) across updates.
 - Update packs and per-game config: see their sections above. Game sheet >
