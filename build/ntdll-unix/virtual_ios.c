@@ -15149,6 +15149,8 @@ static unsigned long long ios_swap_footprint_mb( void )
     mach_msg_type_number_t c = TASK_VM_INFO_COUNT;
     if (task_info( mach_task_self(), TASK_VM_INFO, (task_info_t)&vmi, &c ) != KERN_SUCCESS) return 0;
     return (unsigned long long)vmi.phys_footprint >> 20;
+}
+
 /* Replacement for decommit_pages in pinned virtual_ios.c.  The original
  * ios_pool_live_overlap helper is retained.  All helpers are inlined so the
  * native build can preserve the original function's bounds/unwind frame.

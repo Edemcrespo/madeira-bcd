@@ -105,9 +105,8 @@ Until build 221 this fork carried 125hz's PR #28 (WoW64 + DXMT D3D9) with the
 `125hz/dxmt pr/d3d9`. Build 222 switched to upstream, which now has its own
 WoW64 and D3D9 and pins wine `daa17d0`, DXMT `a5e0cd3`, FEX `2838f3b`. Lost
 until 125hz re-upstreams them: fastsync, the fs caches and the networking
-changes in 125hz's wine. The i386 module set is still 125hz's committed
-farm; CI does not rebuild it from upstream's wine (`build/wine-i386`), so
-32-bit programs may not match the new wine.
+changes in 125hz's wine. The i386 farm is built by CI from the pinned wine
+and DXMT (`build/wine-i386/build.sh`, cached) instead of being committed.
 
 With the series the only monitor is the virtual one, which has no source.
 `NtUserDisplayConfigGetDeviceInfo` (`build/win32u-unix/sysparams_ios.c`)

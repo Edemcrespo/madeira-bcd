@@ -735,9 +735,11 @@ one-pass conversion). How the overlaps were resolved:
   still works.
 * CI: builds FFmpeg (`build/ffmpeg`, cached; the app links libav*.a) and the
   Dock host (`build/madeira-dock`, may fail without breaking the build).
-  The 32-bit `i386-windows` set is still 125hz's committed farm; CI does not
-  rebuild it from upstream's wine (`build/wine-i386`), so 32-bit games may
-  not match the new wine.
+  The 32-bit `i386-windows` farm is no longer committed (upstream's rule);
+  CI builds it with `build/wine-i386/build.sh` (cached per wine/DXMT
+  revision, continue-on-error: without it only 32-bit programs fail).
+  125hz's committed DXMT/nsi PE DLLs in aarch64-windows/arm64ec-windows were
+  replaced by upstream's (they called 125hz's DXMT unix slots).
 * Launch log prints the game's config file (`[game-cfg]` lines).
 * Removed 16 host tests from 125hz's WoW64 series that probe code no longer
   in the tree; `ConfigCatalog.generated.swift` regenerated (it lists our keys).

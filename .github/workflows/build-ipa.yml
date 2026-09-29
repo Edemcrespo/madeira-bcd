@@ -871,6 +871,40 @@ jobs:
       - name: Patch DXMT with DXIL tessellation emulation
         run: python3 tools/patch-dxmt-dxil-tess.py
 
+      # WoW64's 32-bit Windows farm (app/Madeira/i386-windows), which upstream
+      # builds from the pinned wine and DXMT (build/wine-i386) and does not
+      # commit. Cached per wine/DXMT revision; a failure only leaves 32-bit
+      # programs without their DLLs, so it does not stop the IPA.
+      - name: i386 farm revision
+        id: i386rev
+        shell: bash
+        run: echo "key=i386-farm-$(git -C wine rev-parse HEAD)-$(git -C research/dxmt rev-parse HEAD)-${{ hashFiles('build/wine-i386/build.sh', 'tools/patch-dxmt-*.py') }}" >> "$GITHUB_OUTPUT"
+
+      - name: Restore i386 farm
+        id: i386cache
+        uses: actions/cache/restore@v4
+        with:
+          path: app/Madeira/i386-windows
+          key: ${{ steps.i386rev.outputs.key }}
+
+      - name: Build i386 farm (WoW64)
+        id: i386build
+        if: steps.i386cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        shell: bash
+        run: |
+          bash build/wine-i386/build.sh 2>&1 | tail -60; rc=${PIPESTATUS[0]}
+          N=$(ls app/Madeira/i386-windows | wc -l | tr -d ' ')
+          echo "::notice::i386 farm: $N files (build exit $rc)"
+          [ "$rc" -eq 0 ] || { tail -40 wine/build-i386/madeira-i386-build.log 2>/dev/null; exit "$rc"; }
+
+      - name: Save i386 farm
+        if: steps.i386cache.outputs.cache-hit != 'true' && steps.i386build.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: app/Madeira/i386-windows
+          key: ${{ steps.i386rev.outputs.key }}
+
       - name: Build dxmt-ios
         shell: bash
         run: |
