@@ -1325,9 +1325,6 @@ struct ContentView: View {
             }
             .onAppear {
                 jit_install_trap_handler()
-                // ml1330: StikDebug is closed by iOS about a minute after it
-                // attaches; take the process-lifetime JIT pool while it is here.
-                StikJITHelper.prepareEarlyPool(trigger: "start")
                 entitlements = EntitlementStatus.check()
                 logEntitlementStatus()
                 logStore.log("[build] \(BuildStamp.text)")
