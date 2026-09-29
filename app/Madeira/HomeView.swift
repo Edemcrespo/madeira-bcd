@@ -79,34 +79,8 @@ struct LaunchRequest {
                 unsetenv("MADEIRA_SCREEN_SRC")
             }
         }
-        if avx { setenv("MADEIRA_FEX_AVX", "1", 1) } else { unsetenv("MADEIRA_FEX_AVX") }
-        if wineVCRT { setenv("MADEIRA_WINE_VCRT", "1", 1) } else { unsetenv("MADEIRA_WINE_VCRT") }
-        var dxmtExtra: [String] = []
-        if nvidia {
-            setenv("DXMT_ENABLE_NVEXT", "1", 1)
-            // The same GeForce RTX 3060 (10DE:2544) win32u registers as the
-            // display adapter (sysparams_ios.c, ios_virtual_gpu_ids); merged
-            // into DXMT_CONFIG by ContentView.
-            dxmtExtra.append("dxgi.customDeviceId=2544")
-        } else {
-            unsetenv("DXMT_ENABLE_NVEXT")
-        }
-        // madeira-bcd: the game's own settings (GameProfiles.swift).
-        if let p = profile, p.hasSettings, let u = p.url {
-            setenv("MADEIRA_CFG_GAME", u.path, 1)
-        } else {
-            unsetenv("MADEIRA_CFG_GAME")
-        }
-        // MetalFX: the D3D12 runtime reads metalfx-upscale from that file; a
-        // D3D11 game gets DXMT's own MetalFX swapchain at the same factor.
-        if let f = profile?.metalFXFactor {
-            setenv("DXMT_METALFX_SPATIAL_SWAPCHAIN", "1", 1)
-            dxmtExtra.append("d3d11.metalSpatialUpscaleFactor=\(f)")
-        } else {
-            unsetenv("DXMT_METALFX_SPATIAL_SWAPCHAIN")
-        }
-        if dxmtExtra.isEmpty { unsetenv("MADEIRA_DXMT_EXTRA") }
-        else { setenv("MADEIRA_DXMT_EXTRA", dxmtExtra.joined(separator: "\n"), 1) }
+        // The switches upstream's library applies the same way (LibraryBCD.swift).
+        BCDLaunch.applyExtras(avx: avx, wineVCRT: wineVCRT, nvidia: nvidia, profile: profile)
         if let limit = profile?.frameLimit { FrameLimit.apply(limit) }
         // Only forced off here; when the switch is off, madeira.cfg's own
         // env.MADEIRA_FASTSYNC (exported above) still decides.
@@ -183,18 +157,26 @@ struct RootView: View {
         case session(LaunchRequest?)
     }
 
-    @State private var screen: Screen = .home
+    /// Upstream's library (inside ContentView) unless Settings › Interface
+    /// chose madeira-bcd's home screen (FrontendChoice "bcd").
+    @State private var screen: Screen = FrontendChoice.startupBCD ? .home : .session(nil)
 
     var body: some View {
-        switch screen {
-        case .home:
-            HomeView(onLaunch: { screen = .session($0) },
-                     onDeveloper: {
-                         ExperimentalSettings.exportToEnvironment()
-                         screen = .session(nil)
-                     })
-        case .session(let request):
-            ContentView(pendingLaunch: request)
+        Group {
+            switch screen {
+            case .home:
+                HomeView(onLaunch: { screen = .session($0) },
+                         onDeveloper: {
+                             ExperimentalSettings.exportToEnvironment()
+                             screen = .session(nil)
+                         })
+            case .session(let request):
+                ContentView(pendingLaunch: request)
+            }
+        }
+        // The developer interface's "madeira-bcd Home" button.
+        .onReceive(NotificationCenter.default.publisher(for: .madeiraShowBCDHome)) { _ in
+            if wine_process_is_running() == 0 { screen = .home }
         }
     }
 }
@@ -1324,6 +1306,14 @@ struct AppSettingsSheet: View {
                     }
                 }
 
+                // madeira-bcd: which screen Madeira starts with (LibraryBCD.swift).
+                Section {
+                    BCDInterfacePicker()
+                } header: {
+                    Text("Interface")
+                } footer: {
+                    Text("Library is upstream's game library (the default). Applies after Madeira restarts.")
+                }
                 UpdatesSection()
 
                 SavesSection()

@@ -1324,6 +1324,13 @@ struct ContentView: View {
                 library.refreshFlag()
                 if library.enabled && library.current == nil { MetalHostView.shared.isHidden = true }
             }
+            // madeira-bcd: a Home Screen shortcut (madeira://play?exe=...) starts its
+            // library entry; madeira-bcd home handles it when that screen is up.
+            .onReceive(ShortcutRouter.shared.$pendingExe) { exe in
+                guard library.enabled, library.current == nil, let exe else { return }
+                ShortcutRouter.shared.pendingExe = nil
+                launchShortcut(exe)
+            }
             .onAppear {
                 jit_install_trap_handler()
                 // ml1330: StikDebug is closed by iOS about a minute after it
@@ -2253,6 +2260,14 @@ struct ContentView: View {
                 }
                 .buttonStyle(.bordered)
                 .tint(.indigo)
+
+                // madeira-bcd: this fork's own home screen, right away (RootView).
+                Button("madeira-bcd Home") {
+                    NotificationCenter.default.post(name: .madeiraShowBCDHome, object: nil)
+                }
+                .buttonStyle(.bordered)
+                .tint(.orange)
+                .disabled(wine_process_is_running() != 0)
             }
             .padding()
         }
@@ -2510,6 +2525,25 @@ struct ContentView: View {
     /// Play in the library (Library.swift): checks that a session can start,
     /// applies the entry's launch profile and runs the same full sequence as the
     /// developer interface's buttons.
+    /// madeira-bcd: the library entry for a shortcut's exe, added first when the
+    /// library does not have it yet (as the + button would).
+    private func launchShortcut(_ exe: String) {
+        let key = exe.lowercased()
+        if let entry = library.entries.first(where: { $0.desktop != true && $0.windowsPath.lowercased() == key }) {
+            launchLibraryEntry(entry); return
+        }
+        guard key.hasPrefix("c:\\"),
+              var entry = try? LibraryModel.inspect(LibraryModel.drive.appendingPathComponent(
+                String(exe.dropFirst(3)).replacingOccurrences(of: "\\", with: "/"))) else {
+            LogStore.shared.log("[shortcut] \(exe) is not in drive_c", level: .error)
+            library.error = "The shortcut's game was not found: \(exe)"
+            return
+        }
+        entry.title = exe.split(separator: "\\").dropLast().last.map(String.init) ?? entry.title
+        library.save(entry)
+        launchLibraryEntry(entry)
+    }
+
     private func launchLibraryEntry(_ entry: LibraryEntry) {
         guard wine_process_is_running() == 0, wineserver_is_running() == 0, library.current == nil else {
             library.error = "A session is already running."; return
@@ -2534,6 +2568,8 @@ struct ContentView: View {
             library.error = "The executable path or launch arguments are too long."; return
         }
         entry.configureLaunch()
+        // madeira-bcd: update pack, the game's own options and session log (LibraryBCD.swift).
+        BCDLaunch.applyLibrary(entry)
         library.begin(entry)
         runWineFullSequence(profile: entry)
     }

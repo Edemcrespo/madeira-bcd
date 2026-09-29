@@ -121,27 +121,36 @@ final class LibraryController: ObservableObject, @unchecked Sendable {
 enum FrontendChoice {
     static let key = "madeiraFrontend"
     static let startup: (useNew: Bool, source: String) = {
-        if let stored = UserDefaults.standard.string(forKey: key), ["new", "old"].contains(stored) {
+        if let stored = UserDefaults.standard.string(forKey: key), ["new", "old", "bcd"].contains(stored) {
             return (stored == "new", "setting")
         }
         if let configured = MadeiraConfig.get("env.MADEIRA_FRONTEND") { return (configured != "0", "config") }
         if let value = getenv("MADEIRA_FRONTEND").map({ String(cString: $0) }) { return (value != "0", "environment") }
         return (MadeiraConfig.flag("MADEIRA_FRONTEND_DEFAULT_NEW"), "default")
     }()
+    /// madeira-bcd: this run started on madeira-bcd's home screen (HomeView),
+    /// which, like the developer interface, runs without the library.
+    static let startupBCD: Bool = UserDefaults.standard.string(forKey: key) == "bcd"
     /// The interface the next start uses.
-    static var preferNew: Bool {
-        guard let stored = UserDefaults.standard.string(forKey: key), ["new", "old"].contains(stored) else { return startup.useNew }
-        return stored == "new"
+    static var preferNew: Bool { preferred == "new" }
+    /// "new" (library), "bcd" (madeira-bcd home) or "old" (developer interface).
+    static var preferred: String {
+        guard let stored = UserDefaults.standard.string(forKey: key), ["new", "old", "bcd"].contains(stored) else {
+            return startup.useNew ? "new" : "old"
+        }
+        return stored
     }
-    static func choose(new useNew: Bool) {
-        UserDefaults.standard.set(useNew ? "new" : "old", forKey: key)
-        LogStore.shared.log("[frontend] next-start choice=\(useNew ? "library" : "developer") source=setting")
+    static func choose(new useNew: Bool) { choose(useNew ? "new" : "old") }
+    static func choose(_ value: String) {
+        UserDefaults.standard.set(value, forKey: key)
+        let name = value == "new" ? "library" : value == "bcd" ? "madeira-bcd home" : "developer"
+        LogStore.shared.log("[frontend] next-start choice=\(name) source=setting")
     }
     private static var logged = false
     static func logStartup() {
         guard !logged else { return }
         logged = true
-        LogStore.shared.log("[frontend] choice=\(startup.useNew ? "library" : "developer") source=\(startup.source)")
+        LogStore.shared.log("[frontend] choice=\(startup.useNew ? "library" : startupBCD ? "madeira-bcd home" : "developer") source=\(startup.source)")
     }
 }
 
@@ -214,7 +223,7 @@ struct LibraryEntry: Codable, Identifiable {
     func validate() throws {
         let size = resolution.split(separator: "x").compactMap { Int($0) }
         guard size.count == 2, (320...4096).contains(size[0]), (240...4096).contains(size[1]),
-              (0...3).contains(fpsMode), !arguments.contains("\0"), !windowsPath.contains("\0") else {
+              (0...4).contains(fpsMode), !arguments.contains("\0"), !windowsPath.contains("\0") else {
             throw LibraryError.message("The saved launch profile contains invalid display or argument values.")
         }
         var quoted = false, inToken = false, tokens = 0
@@ -1134,7 +1143,8 @@ struct LibraryView: View {
     @ObservedObject private var input = InputSettings.shared
     @State private var tab = 0
     // The interface the next start uses (FrontendChoice).
-    @State private var developerUI = !FrontendChoice.preferNew
+    @State private var importing = false
+    @State private var importResult: String?
     @State private var restartNotice = false
     @State private var settingsSheet: SettingsSheet?
     @State private var settingsRefresh = 0
@@ -1257,11 +1267,18 @@ struct LibraryView: View {
             }
             if settingsShow("interface", "developer") {
                 Section {
-                    Toggle("Use developer interface", isOn: Binding(get: { developerUI }, set: { on in
-                        developerUI = on; FrontendChoice.choose(new: !on); restartNotice = true
-                    }))
+                    // madeira-bcd: its own home screen is a third choice.
+                    BCDInterfacePicker()
+                    Button(importing ? "Adding games…" : "Add every game in drive_c", systemImage: "square.and.arrow.down.on.square") {
+                        importing = true
+                        BCDLibraryImport.run { added in
+                            importing = false
+                            importResult = added == 0 ? "No new games found." : "\(added) game\(added == 1 ? "" : "s") added to the library."
+                        }
+                    }.disabled(importing)
+                    if let importResult { Text(importResult).font(.caption).foregroundStyle(.secondary) }
                 } header: { Text("Interface") } footer: {
-                    Text("The developer interface is Madeira's original diagnostic screen. The change applies after Madeira restarts.")
+                    Text("madeira-bcd home is this fork's own game screen; the developer interface is Madeira's original diagnostic screen. The change applies after Madeira restarts. Add every game finds each game's main executable under drive_c, as madeira-bcd home does.")
                 }
             }
             // Search: the matching options of All settings, editable here.
@@ -1422,6 +1439,11 @@ struct LibraryView: View {
                 }
             }.foregroundStyle(.primary)
         }.buttonStyle(.plain)
+            // madeira-bcd: a long press offers Play and the game's settings.
+            .contextMenu {
+                Button { play(entry) } label: { Label("Play", systemImage: "play.fill") }
+                Button { selected = entry } label: { Label("Game settings", systemImage: "slider.horizontal.3") }
+            }
             .overlay(RoundedRectangle(cornerRadius: 16).stroke(focused == entry.id && controller.connected ? Color.accentColor : .clear, lineWidth: 2))
             .id(entry.id)
             .task(id: entry.id, priority: .utility) { await model.refreshMetadata(entry.id) }
@@ -1475,6 +1497,7 @@ struct LibraryDetail: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject private var model = LibraryModel.shared
     @State private var importCover = false
+    @State private var bcdRefresh = 0
     @State private var remove = false
     @State private var leaving = false
     @State private var error: String?
@@ -1482,7 +1505,8 @@ struct LibraryDetail: View {
     /// The presets, plus a stored size that is none of them (a screen shape
     /// chosen on another device), so the picker never shows a blank choice.
     static func resolutions(keeping current: String) -> [String] {
-        presetResolutions.contains(current) || current == screenShapeResolution ? presetResolutions : presetResolutions + [current]
+        presetResolutions.contains(current) || current == screenShapeResolution || current == BCDLaunch.metalFX15Resolution
+            ? presetResolutions : presetResolutions + [current]
     }
     /// "WxH" matching this screen's landscape aspect at 720 lines (width
     /// rounded to a multiple of 8), or nil when it equals a preset or
@@ -1543,6 +1567,17 @@ struct LibraryDetail: View {
                         if let shape = Self.screenShapeResolution {
                             Text("Screen shape (\(shape.replacingOccurrences(of: "x", with: "×")))").tag(shape)
                         }
+                        // madeira-bcd: the screen's shape at 480 lines, for MetalFX 1.5x.
+                        if entry.desktop != true {
+                            let mfx = BCDLaunch.metalFX15Resolution
+                            Text("Screen shape for MetalFX 1.5× (\(mfx.replacingOccurrences(of: "x", with: "×")))").tag(mfx)
+                        }
+                    }
+                    .onChange(of: entry.resolution) { _, size in
+                        // The 480-line size is meant for MetalFX 1.5x: turn it on when it was off.
+                        guard entry.desktop != true, size == BCDLaunch.metalFX15Resolution else { return }
+                        let profile = GameProfile(windowsPath: entry.windowsPath)
+                        if profile.get("metalfx-upscale") == nil { profile.set("metalfx-upscale", "1.5"); bcdRefresh += 1 }
                     }
                     Picker("Aspect & scaling", selection: Binding(get: { entry.displayMode.rawValue }, set: { entry.display = $0 })) {
                         ForEach(DisplayMode.allCases, id: \.rawValue) { Text($0.label).tag($0.rawValue) }
@@ -1557,6 +1592,8 @@ struct LibraryDetail: View {
                 } header: { Text("Compatibility & performance") } footer: {
                     Text("Reduced-precision x87 can make older games faster at some cost in accuracy; it is off by default. Settings apply to the next launch; a precision change may still require restarting Madeira.")
                 }
+                // madeira-bcd: this fork's per-game options (LibraryBCD.swift).
+                if entry.desktop != true { BCDGameSections(windowsPath: entry.windowsPath, refresh: bcdRefresh) }
                 Section("On screen") {
                     Toggle("Performance overlay", isOn: $entry.performance)
                     Toggle("Live logs", isOn: $entry.liveLogs)
@@ -1615,6 +1652,8 @@ struct FPSChoice: View {
         HStack { Text("FPS limit"); Spacer(); Picker("FPS limit", selection: $mode) {
             // 30 needs DXMT's 30 FPS cap (ProMotionIntent.has30Cap); a saved 30 stays selectable.
             if ProMotionIntent.has30Cap || mode == 3 { Text("30 FPS").tag(3) }
+            // madeira-bcd: 40 FPS (vsync mode 4, tools/patch-dxmt-frame-limits.py).
+            Text("40 FPS").tag(4)
             Text("60 FPS").tag(1); Text("Display maximum").tag(0); Text("Uncapped").tag(2)
         }.labelsHidden().pickerStyle(.menu) }
     }
