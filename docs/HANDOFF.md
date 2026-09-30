@@ -152,6 +152,19 @@ makes, with the reason and the evidence), `docs/WOW64.md`, `docs/BUILDING.md`.
     64-bit PE is a committed upstream binary, so that guard needs a PE rebuild).
   - Build 260 (5e90d18) was superseded early by build 261 (74ad830: vfetch
     bounds for SM 4.x + shared textures without mach port + OTA e-mail).
+  - **Steam games' session logs (owner's request, 2026-09-30; not yet built --
+    the owner said to hold it for the next build):** games started with the
+    Steam licence (Madeira Dock: explorer.exe first, Valve's client picks the
+    program) got no `Documents/logs/<exe>-<stamp>.txt`, because only the
+    app's own launch paths call LogStore.startSessionLog. Now
+    `madeira_steam_session_log` in build/ntdll-unix/process_ios.c
+    (NtCreateUserProcess, after the spawn phase stamp) hard-links
+    madeira-log.txt as `logs/<exe>-<local time>.txt` when a process under
+    `steamapps\common\` starts (once per exe name; skips names containing
+    fxc/redist/dxsetup/crash/setup/install -- Crysis Remastered spawns
+    fxc.exe) and logs `[session-log] ... Steam game <exe>: logs/...`.
+    Unit-tested on Linux in isolation (link made, fxc/duplicate/system exe
+    skipped); ntdll-unix build on CI is the real check.
 
 ---
 

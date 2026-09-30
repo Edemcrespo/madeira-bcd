@@ -566,6 +566,13 @@ the update pack, the game's options and starts the per-game session log.
   madeira-log.txt, so every writer's lines land in both and the next
   launch's rotation leaves the finished run under its own name. The newest
   40 are kept.
+  A Steam game started through Madeira Dock (explorer.exe first, Valve's
+  client picks the program later) gets its link from the native side
+  instead: `madeira_steam_session_log` in `build/ntdll-unix/process_ios.c`
+  links the log as `logs/<exe>-<stamp>.txt` when a process whose image lies
+  under `steamapps\common\` starts (once per exe name; helpers such as
+  fxc.exe, setup/installer/redist/crash-handler programs skipped) and logs
+  `[session-log]`.
 - Game Mode (`GCSupportsGameMode`, `LSSupportsGameMode`, games category) in
   Info.plist; `LSSupportsGameMode` silences the Metal HUD's "key not found"
   warning.
