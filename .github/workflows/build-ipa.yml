@@ -628,7 +628,7 @@ jobs:
           path: FEX/build-arm64ec
           key: fex-arm64ec-${{ steps.fexrev.outputs.sha }}-v2
 
-      - name: Build xtajit64.dll with the AVX opt-in
+      - name: Build xtajit64.dll (map-notification fix, AVX opt-in)
         if: env.MINGW_OK == '1'
         continue-on-error: true
         run: bash tools/build-xtajit64.sh
