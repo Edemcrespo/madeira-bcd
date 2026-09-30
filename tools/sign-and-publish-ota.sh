@@ -176,12 +176,12 @@ p{color:#aaa;font-size:14px}
 EOF
 s3 cp "$W/kurulum.html" "s3://$B2_SIGN_BUCKET/kurulum.html" --content-type "text/html; charset=utf-8" --cache-control no-cache
 
-# Keep the last three builds (IPA + manifest).
+# Keep the last ten builds (IPA + manifest); older ones stay in the Actions artifacts.
 s3 ls "$B/" | awk '{print $4}' | python3 -c '
 import re, sys
 names = [l.strip() for l in sys.stdin if re.match(r"^Madeira-.*[.]ipa$", l.strip())]
 key = lambda n: [int(x) for x in re.findall(r"[0-9]+", n)]
-for n in sorted(names, key=key)[:-3]:
+for n in sorted(names, key=key)[:-10]:
     print(n)' |
   while read -r old; do
     v="${old#Madeira-}"; v="${v%.ipa}"
