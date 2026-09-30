@@ -9,6 +9,8 @@
 #  - patch-fex-ios-cpuid-index.py: CPUID 0x80000002-4 indexed the per-CPU table
 #    with the raw host CPU number; 32-bit Crysis died in strlen(0xfff68000)
 #    inside Function_8000_0002h before its first frame (log 2026-09-30 11:57).
+#  - patch-fex-ios-teb-tsd.py: the WinAPI shims' GetCurrentTEB() read x18,
+#    which is 0 on some iOS threads (32-bit Crysis, TlsGetValue, log 12:25).
 set -eu
 R="$(pwd)"
 MINGW="${MINGW:-$R/toolchains/llvm-mingw-20260421-ucrt-macos-universal/bin}"
@@ -20,7 +22,8 @@ JOBS="$(sysctl -n hw.ncpu 2>/dev/null || nproc)"
 
 git -C FEX diff --name-only | while read -r f; do git -C FEX checkout -- "$f"; done
 python3 "$R/tools/patch-fex-ios-cpuid-index.py" "$R/FEX/$CPUIDF"
-restore() { git -C "$R/FEX" checkout -- "$CPUIDF"; }
+python3 "$R/tools/patch-fex-ios-teb-tsd.py" "$R/FEX/Source/Windows/Common/Priv.h"
+restore() { git -C "$R/FEX" checkout -- "$CPUIDF" Source/Windows/Common/Priv.h; }
 trap restore EXIT
 
 cmake -S "$R/FEX" -B "$B" -G Ninja -DCMAKE_BUILD_TYPE=Release \
@@ -43,4 +46,4 @@ if ! diff "$B.old-exports" "$B.new-exports"; then
     exit 1
 fi
 cp "$B/Bin/libwow64fex.dll" "$SHIP"
-echo "::notice::xtajit.dll (WOW64) built from FEX $(git -C FEX rev-parse --short HEAD) with the CPUID index wrap, and shipped"
+echo "::notice::xtajit.dll (WOW64) built from FEX $(git -C FEX rev-parse --short HEAD) with the CPUID index wrap and the TSD-slot TEB for the WinAPI shims, and shipped"

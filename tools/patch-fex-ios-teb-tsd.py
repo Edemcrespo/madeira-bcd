@@ -32,7 +32,7 @@ if src.count(old) != 1:
     sys.exit("patch-fex-ios-teb-tsd: GetCurrentTEB anchor not found")
 src = src.replace(old, """/* madeira-bcd: GetCurrentTEB without x18 (tools/patch-fex-ios-teb-tsd.py). On the iOS host
  * x18 reads 0 on some threads; the TEB Wine publishes in the thread's TSD slot does not. */
-#if defined(FEX_IOS_HOST) && defined(ARCHITECTURE_arm64ec)
+#if defined(FEX_IOS_HOST)
 extern "C" uint32_t IosTebTsdOffset;
 static inline __TEB* GetCurrentTEB() {
   const uint32_t Off = IosTebTsdOffset;

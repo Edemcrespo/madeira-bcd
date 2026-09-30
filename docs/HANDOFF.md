@@ -831,6 +831,15 @@ same game was never tested here.
   (xtajit.dll, until now built by hand with build/fex-wow64/build.sh) is now
   built in CI by tools/build-xtajit-wow64.sh (cached FEX/build-wow64; the
   committed module stays if the build fails or its exports differ).
+* 32-bit Crysis on build 244 (log 12:25): past CPUID; loads CryGame,
+  CrySystem, CryAction, d3dx9/d3dcompiler_43, CryInput, CrySoundSystem
+  (fmod), CryFont, CryAISystem, CryAnimation, Cry3DEngine, CryScriptSystem,
+  CryEntitySystem; 489 presents in the first 30 s; ran ~4 minutes compiling
+  shaders (d3dcompiler reflection fixmes). Then libwow64fex+0x11f644: the
+  TlsGetValue shim with x18 = 0 read TlsSlots[20] at 0x1520 -- the same
+  GetCurrentTEB() problem as GoW's on ARM64EC. Build 245 applies
+  tools/patch-fex-ios-teb-tsd.py to the WOW64 module too (its IosTebTsdOffset
+  is published into the same extern "C" variable).
 
 ### Build 226: first green IPA after the switch (2026-09-29, run 36595079405)
 Commit 17088ab (main fast-forwarded; the automatic main run 227 cancelled).
