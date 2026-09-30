@@ -892,6 +892,17 @@ same game was never tested here.
   It only reaches 32-bit games: the i386 farm is rebuilt from research/dxmt,
   the 64-bit PE d3d11.dll is still the committed binary. If [cb-short] never
   appears, candidate (1) is refuted.
+* Performance (the -dx9 log 14:53 and the D3D10 log 13:19 alike): the main
+  thread 0024 ran 0 ms on P-cores and ~600 ms/s on E-cores (2.1-2.6 GHz),
+  [cpu-split] 88-97 % x64 JIT, while the game's time-critical thread (0060)
+  ran on P-cores at 4.2 GHz. wineserver's apply_thread_priority (__APPLE__
+  branch of wine/server/thread.c) sets Mach precedence/throughput/latency
+  policies from the Windows priority at thread start; for NORMAL threads that
+  appears to override the USER_INTERACTIVE QoS the guest threads ask for.
+  Build 249: tools/patch-wine-thread-qos.py skips those policies below the
+  realtime band on WINE_IOS ([thread-prio] lines;
+  MADEIRA_WIN_THREAD_PRIORITY=1 restores them). Check [xp-t] for 0024's P ms.
+  The owner also has the in-game 60 FPS cap on; to be turned off for the test.
 
 ### Build 226: first green IPA after the switch (2026-09-29, run 36595079405)
 Commit 17088ab (main fast-forwarded; the automatic main run 227 cancelled).

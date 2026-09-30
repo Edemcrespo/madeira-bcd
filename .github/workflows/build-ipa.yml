@@ -389,6 +389,11 @@ jobs:
             exit 1
           fi
 
+      # Windows thread priorities must not demote USER_INTERACTIVE guest
+      # threads onto the efficiency cores (Crysis's main thread ran there).
+      - name: Patch wineserver thread priorities (keep pthread QoS)
+        run: python3 tools/patch-wine-thread-qos.py
+
       - name: Build base libwineserver.a from wine/server sources
         shell: bash
         run: |
