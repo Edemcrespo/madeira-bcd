@@ -855,6 +855,18 @@ same game was never tested here.
   or 00dc), so the main thread sat out a 30 s join timeout. Build 247:
   NtSuspendThread (build/ntdll-unix/thread_ios.c) waits like wait_suspend()
   when the target is the calling thread ([self-suspend] log line).
+* Build 247 on device (log 2026-09-30 13:19 + screen recording): the intro
+  gaps are gone ([self-suspend] #1.. for tid 00b8) and Crysis reaches the
+  first level (beach, nanosuit boot HUD) at ~55 FPS, GPU ~5-6 ms, via
+  CryRenderD3D10 -> DXMT d3d11 (feature level 10_0). Rendering bug: parts of
+  the scene (nearby foliage, it looks like) are replaced by long vertical --
+  and some horizontal -- streaks spanning the screen, i.e. vertices thrown far
+  out (clip w near 0 or garbage) rather than a texture problem; rocks, beach,
+  trees at distance, weapon and HUD are fine. No DXMT warnings in the log.
+  There is no D3D11 capture tool yet (CAP sheets are madeira_d3d12 only).
+  Asked the owner to bisect with the in-game Advanced settings (all Low, then
+  raise Objects / Shaders / Game Effects one at a time) and to try the `-dx9`
+  launch argument (DXMT d3d9 path) for comparison.
 
 ### Build 226: first green IPA after the switch (2026-09-29, run 36595079405)
 Commit 17088ab (main fast-forwarded; the automatic main run 227 cancelled).
