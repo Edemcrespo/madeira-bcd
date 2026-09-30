@@ -867,6 +867,21 @@ same game was never tested here.
   Asked the owner to bisect with the in-game Advanced settings (all Low, then
   raise Objects / Shaders / Game Effects one at a time) and to try the `-dx9`
   launch argument (DXMT d3d9 path) for comparison.
+* Second recording (13:55): settings had been at Low; raised a notch, far
+  vegetation renders correctly and the broken shapes change: streaks radiate
+  from vanishing points (vertical toward zenith/nadir, horizontal toward the
+  horizon), so vertices of some nearby meshes are displaced very far in WORLD
+  space, not a screen-space pass. Reviewed and ruled out as obvious causes:
+  airconv vertex-format pulling (half/snorm/BGRA paths look right), wine's
+  d3dcompiler reflection (skips are STAT/signature padding; D3D10 GetDesc
+  maps to D3D10_SHADER_DESC). Open candidates, none proven: (1) constant
+  buffers bound smaller than the shader declares -- airconv loads cb[] with no
+  bounds and Metal has no robustness, so D3D's zero-fill becomes garbage
+  (a fix needs the declared size at encode time; MTL_SM50_SHADER_ARGUMENT is
+  also mirrored in research/madeira-d3d12/src/madeira_ir_abi.h, so do not
+  grow it without updating both); (2) 16-bit index buffer offsets that are
+  2 mod 4 (odd StartIndexLocation) passed straight to Metal. The -dx9
+  comparison is still pending.
 
 ### Build 226: first green IPA after the switch (2026-09-29, run 36595079405)
 Commit 17088ab (main fast-forwarded; the automatic main run 227 cancelled).
