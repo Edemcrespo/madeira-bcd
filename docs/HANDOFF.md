@@ -53,6 +53,13 @@ makes, with the reason and the evidence), `docs/WOW64.md`, `docs/BUILDING.md`.
     Crysis D3D10 trees (look for `[idx-align] ... encode: realigned` and
     `[cb-short] ... encode:` lines), ECO under Session -> CPU, God of War
     with Madsync (251 is the fallback).
+  - **OTA install confirmed on device** (owner, 2026-09-30 18:27 UTC+3): the
+    kurulum-0.1.256.html -> "Yükle" flow installed build 256 on the first try.
+    The owner is now downloading 64-bit Crysis Remastered (19.4 GB) through the
+    in-app Steam library. Note: 64-bit games use the committed PE d3d11.dll, so
+    the cb-short/idx-align DXMT patches (i386 farm) do not apply to it.
+    (Correction: pushing HANDOFF to main does not start a build -- build-ipa.yml
+    runs on push only when the workflow file itself changes.)
 
 ---
 
