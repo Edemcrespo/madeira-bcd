@@ -148,6 +148,8 @@ makes, with the reason and the evidence), `docs/WOW64.md`, `docs/BUILDING.md`.
     shared textures (none in its 19:01 log). The null-RTV clear itself would
     still crash if it came from elsewhere (DXVK ignores a NULL view; DXMT's
     64-bit PE is a committed upstream binary, so that guard needs a PE rebuild).
+  - Build 260 (5e90d18) was superseded early by build 261 (74ad830: vfetch
+    bounds for SM 4.x + shared textures without mach port + OTA e-mail).
 
 ---
 
