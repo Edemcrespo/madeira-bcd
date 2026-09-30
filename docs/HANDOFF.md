@@ -44,6 +44,15 @@ makes, with the reason and the evidence), `docs/WOW64.md`, `docs/BUILDING.md`.
     the next build).
   - **OTA install** set up (section 2b). ECO toggle is in the in-game Session
     menu under "CPU" (LibraryHUD in Library.swift).
+  - **Build 256 green** (run 36731040994, head 6e6f4c8, main fast-forwarded):
+    merge + HAVE_NET_ROUTE_H fix + cb-short/idx-align with GpuManaged
+    coverage. First OTA run worked: log 14:59:16 UTC notice "OTA: Madeira
+    0.1.256 signed (profile expires 2027-01-27) ... kurulum-0.1.256.html
+    written to the private bucket (links valid until 2026-10-07 14:59 UTC)".
+    **Waiting on device test:** OTA install from kurulum-0.1.256.html,
+    Crysis D3D10 trees (look for `[idx-align] ... encode: realigned` and
+    `[cb-short] ... encode:` lines), ECO under Session -> CPU, God of War
+    with Madsync (251 is the fallback).
 
 ---
 
