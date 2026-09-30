@@ -758,6 +758,18 @@ same game was never tested here.
   the stack at each of the first four jumbo reservations ([jumbo-tls]):
   jumbo#1 is heap A's VirtualAlloc (before the push), jumbo#2 the arena
   (after it).
+* Build 238 (log 10:28): [jumbo-tls] #1 (before the game's first push)
+  already reads index 0, and #2 (right after the push of heap A into
+  table[1]) reads index 0 again; the arena push then overwrote A. So
+  something outside the game zeroes TLS[0]+0x8..+0xf. It is FEX:
+  xtajit64's own TLS template (0x30 bytes) holds `thread_local IRCapRIP`
+  (PassManager.cpp, ml623 IR capture) at offset 8, Core.cpp clears it at the
+  start of every block compile, and in the ARM64EC module that implicit-TLS
+  access lands in the executable's TLS[0] block (implicit TLS is banned in
+  xtajit64 for this reason; the WOW64 module already uses an atomic). Build
+  239: tools/patch-fex-ios-ircap-tls.py makes it an atomic in the ARM64EC
+  module as well. The other xtajit64 thread_local (AllocWatch's Anchor, +0x10)
+  only has its address taken.
 
 ### Build 226: first green IPA after the switch (2026-09-29, run 36595079405)
 Commit 17088ab (main fast-forwarded; the automatic main run 227 cancelled).

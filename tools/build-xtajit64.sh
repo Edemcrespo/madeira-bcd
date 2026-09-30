@@ -119,15 +119,19 @@ fi
 #    growing FEX's heap) must not wait on its own thread (God of War, builds
 #    230-231: HandleMemoryProtectionNotification -> EFmt -> rpmalloc ->
 #    VirtualAlloc -> NotifyMemoryAlloc -> the same lock).
+#  - patch-fex-ios-ircap-tls.py: FEX's IR-capture mark was a thread_local that
+#    landed in the game's own TLS[0] block and zeroed its bytes +0x8..+0xf on
+#    every block compile (God of War's allocator-stack index, builds 234-238).
 #  - patch-fex-ios-avx.py: AVX/AVX2 only when MADEIRA_FEX_AVX=1 at launch, so
 #    the same module serves both; xtajit64-avx.dll is kept as a copy for the
 #    bridge's existing switch.
-echo "=== with the map-notification and IntervalsLock fixes and the AVX opt-in ==="
+echo "=== with the map-notification, IntervalsLock and IRCapRIP fixes and the AVX opt-in ==="
 python3 "$R/tools/patch-fex-ios-mapview-selfshared.py" "$R/FEX/Source/Windows/ARM64EC/Module.cpp"
 python3 "$R/tools/patch-fex-ios-intervals-reentry.py" "$R/FEX/Source/Windows/Common"
+python3 "$R/tools/patch-fex-ios-ircap-tls.py" "$R/FEX/FEXCore/Source/Interface/IR/PassManager.cpp"
 python3 "$R/tools/patch-fex-ios-avx.py" "$R/FEX/$CPUF"
 build
-git -C FEX checkout -- "$CPUF" Source/Windows/ARM64EC/Module.cpp Source/Windows/Common/InvalidationTracker.h Source/Windows/Common/InvalidationTracker.cpp
+git -C FEX checkout -- "$CPUF" Source/Windows/ARM64EC/Module.cpp Source/Windows/Common/InvalidationTracker.h Source/Windows/Common/InvalidationTracker.cpp FEXCore/Source/Interface/IR/PassManager.cpp
 cp "$B/Bin/libarm64ecfex.dll" "$SHIP"
 cp "$B/Bin/libarm64ecfex.dll" "$AVX"
-echo "::notice::xtajit64.dll (and xtajit64-avx.dll) built from FEX $(git -C FEX rev-parse --short HEAD) with the map-notification and IntervalsLock self-deadlock fixes and the MADEIRA_FEX_AVX opt-in, and shipped"
+echo "::notice::xtajit64.dll (and xtajit64-avx.dll) built from FEX $(git -C FEX rev-parse --short HEAD) with the map-notification and IntervalsLock self-deadlock fixes, IRCapRIP out of the game's TLS, and the MADEIRA_FEX_AVX opt-in, and shipped"
