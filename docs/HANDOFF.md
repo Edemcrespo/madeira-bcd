@@ -732,6 +732,10 @@ same game was never tested here.
   at the start of the 1026 MB reservation was swap-backed there
   (swap-min-kb 1024) and is plain memory now. Next test: swap-min-kb = 1024
   back in GoW's config.
+  Tested (log 09:32, build 236 with swap-min-kb = 1024): the commit is
+  swap-backed again and the fault is unchanged -- not the swap tier. Build
+  237 prints the thread's TLS[0] block and the image's TLS template at the
+  first unhandled fault ([fault-tls]).
 
 ### Build 226: first green IPA after the switch (2026-09-29, run 36595079405)
 Commit 17088ab (main fast-forwarded; the automatic main run 227 cancelled).

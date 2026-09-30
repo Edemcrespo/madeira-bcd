@@ -4795,6 +4795,51 @@ skip_reclaim_band: ;
                      * unhandled faults. God of War on build 234 reads 0x40 through
                      * LDAPR x27,[x6] and the short insn_stream cannot say where x6
                      * came from. */
+                    /* madeira-bcd [fault-tls]: the thread's TLS[0] block (the main
+                     * image's thread-locals) next to the image's TLS template. God of
+                     * War (build 236) takes its current allocator from TLS[0]+0xc
+                     * (index) / +0xf0 (table) / +0x18 and finds none. */
+                    if (cnt == 1 && thread_teb)
+                    {
+                        uint64_t tlsarr = 0, blk = 0, peb = 0, img = 0;
+                        mach_vm_size_t g = 0;
+                        #define FT_RD(a, v) (mach_vm_read_overwrite(mach_task_self(), (mach_vm_address_t)(a), sizeof(v), \
+                                             (mach_vm_address_t)&(v), &g) == KERN_SUCCESS && g == sizeof(v))
+                        if (FT_RD(thread_teb + 0x58, tlsarr) && tlsarr && FT_RD(tlsarr, blk) && blk)
+                        {
+                            uint64_t q[40];
+                            int i;
+                            if (FT_RD(blk, q))
+                                for (i = 0; i < 40; i += 4)
+                                    dprintf(STDERR_FILENO, "[fault-tls] tls0 %llx+%#x: %016llx %016llx %016llx %016llx\n",
+                                        (unsigned long long)blk, i * 8, (unsigned long long)q[i],
+                                        (unsigned long long)q[i + 1], (unsigned long long)q[i + 2],
+                                        (unsigned long long)q[i + 3]);
+                        }
+                        if (FT_RD(thread_teb + 0x60, peb) && peb && FT_RD(peb + 0x10, img) && img)
+                        {
+                            uint32_t lfanew = 0, tls_rva = 0;
+                            uint64_t dir[6];
+                            if (FT_RD(img + 0x3c, lfanew) && FT_RD(img + lfanew + 0xd0, tls_rva) && tls_rva
+                                && FT_RD(img + tls_rva, dir))
+                            {
+                                uint64_t q[40];
+                                uint32_t idx = 0;
+                                int i;
+                                (void)FT_RD(dir[2], idx);
+                                dprintf(STDERR_FILENO, "[fault-tls] image %llx tls dir: raw %llx-%llx index@%llx=%u callbacks %llx zerofill %llu\n",
+                                    (unsigned long long)img, (unsigned long long)dir[0], (unsigned long long)dir[1],
+                                    (unsigned long long)dir[2], idx, (unsigned long long)dir[3],
+                                    (unsigned long long)(dir[4] & 0xffffffffULL));
+                                if (FT_RD(dir[0], q))
+                                    for (i = 0; i < 40; i += 4)
+                                        dprintf(STDERR_FILENO, "[fault-tls] template +%#x: %016llx %016llx %016llx %016llx\n",
+                                            i * 8, (unsigned long long)q[i], (unsigned long long)q[i + 1],
+                                            (unsigned long long)q[i + 2], (unsigned long long)q[i + 3]);
+                            }
+                        }
+                        #undef FT_RD
+                    }
                     if (cnt <= 2)
                     {
                         int r;
