@@ -906,6 +906,11 @@ jobs:
       - name: Patch DXMT constant buffers bound short
         run: python3 tools/patch-dxmt-cb-short.py
 
+      # 16-bit index offsets that are 2 mod 4 get their index range copied to a
+      # 4-byte aligned place (Crysis D3D10 trees; MADEIRA_IDX_REALIGN=0 = off).
+      - name: Patch DXMT to realign 16-bit index ranges
+        run: python3 tools/patch-dxmt-idx-align.py
+
       # WoW64's 32-bit Windows farm (app/Madeira/i386-windows), which upstream
       # builds from the pinned wine and DXMT (build/wine-i386) and does not
       # commit. Cached per wine/DXMT revision; a failure only leaves 32-bit

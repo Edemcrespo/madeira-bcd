@@ -903,6 +903,22 @@ same game was never tested here.
   realtime band on WINE_IOS ([thread-prio] lines;
   MADEIRA_WIN_THREAD_PRIORITY=1 restores them). Check [xp-t] for 0024's P ms.
   The owner also has the in-game 60 FPS cap on; to be turned off for the test.
+* Build 249 on device (log 15:46, 60 FPS cap off): ~92 FPS, GPU ~4 ms; the
+  streaks remain, and the owner saw that they only appear where trees or
+  branches are in view (rocks, sea, sky fine). [cb-short] fired (cb0 80/74,
+  cb1 9/4..42, cb2 4/3 vec4 and more), so short constant buffers were real but
+  not the cause; [idx-align] counted 659456 16-bit draws with offset 2 mod 4.
+  [thread-prio] showed Crysis's main thread toggling base 0/15 and the policies
+  skipped, yet 0024 still ran 0 ms on P-cores. Root cause of that: the guest
+  main thread is created in WineProcessBridge.m with
+  pthread_attr_setschedparam(priority 20), a fixed priority, so Darwin refuses
+  pthread_set_qos_class_self_np (EPERM) -- USER_INTERACTIVE and the ECO switch
+  never applied to it. Build 250: the thread gets its QoS through
+  pthread_attr_set_qos_class_np instead ([main-qos] line), and
+  tools/patch-dxmt-idx-align.py copies misaligned 16-bit index ranges to a
+  4-byte aligned place in the argument buffer (MADEIRA_IDX_REALIGN=0 = off).
+  The ECO toggle is in the session menu (Battery saver (ECO)) and the ECO pill
+  of the Madeira performance overlay, not in Apple's Metal HUD.
 
 ### Build 226: first green IPA after the switch (2026-09-29, run 36595079405)
 Commit 17088ab (main fast-forwarded; the automatic main run 227 cancelled).

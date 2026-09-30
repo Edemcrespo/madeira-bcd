@@ -770,8 +770,14 @@ static void *wine_process_thread(void *arg) {
          * USER_INTERACTIVE so it schedules on P-cores with minimal kernel
          * timer coalescing (same rationale as start_thread in
          * thread_ios.c — default QoS costs tens of ms of sleep leeway). */
-        pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
-        LOG("Wine process thread started");
+        {
+            int qrc = pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+            qos_class_t q = QOS_CLASS_UNSPECIFIED; int rel = 0;
+            pthread_get_qos_class_np(pthread_self(), &q, &rel);
+            LOG("Wine process thread started");
+            dprintf(STDERR_FILENO, "[main-qos] madeira-bcd guest main thread: set USER_INTERACTIVE rc=%d, class now 0x%x\n",
+                    qrc, (unsigned)q);
+        }
 
         /* ml588: seeding itself now happens in wineserver_start(), BEFORE the
          * server loads the registry. Kept here as a safety net for any path
@@ -1622,11 +1628,16 @@ int wine_process_start(const char *prefix_path) {
     // Inject wineserver side — the event loop will pick this up
     wineserver_inject_client_fd(pair[0]);
 
-    // Lower priority so Wine init doesn't starve the main thread
+    // madeira-bcd: no explicit sched priority on the guest main thread. A thread
+    // created with pthread_attr_setschedparam has a fixed priority, and Darwin
+    // then refuses pthread_set_qos_class_self_np (EPERM) -- so the promotion to
+    // USER_INTERACTIVE in wine_process_thread, and the ECO switch, never took,
+    // and the game's main thread ran at priority 20 on the efficiency cores for
+    // the whole session (32-bit Crysis, [xp-t] 0024: 0 ms P / ~100 % E, logs
+    // 2026-09-30 13:19-15:46). Ask for the QoS class through the attribute.
     pthread_attr_t attr;
     pthread_attr_init(&attr);
-    struct sched_param sched = { .sched_priority = 20 };  // lower than default (31)
-    pthread_attr_setschedparam(&attr, &sched);
+    pthread_attr_set_qos_class_np(&attr, QOS_CLASS_USER_INTERACTIVE, 0);
 
     int ret = pthread_create(&g_wine_thread, &attr, wine_process_thread, NULL);
     pthread_attr_destroy(&attr);
