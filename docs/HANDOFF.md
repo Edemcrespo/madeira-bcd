@@ -782,7 +782,11 @@ same game was never tested here.
   in place is re-run (pc for loads, pc-4 for stores) ([mach_exc]
   UNALIGNED-REPATCHED). Third run: FEX native code with x18 = 0 read
   TEB->TlsSlots[1] (addr 0x1488, pc libarm64ecfex+0x12f908) -- the iOS x18
-  problem in a TlsGetValue-style path; open.
+  problem in FEX's TlsGetValue shim (Source/Windows/Common/WinAPI/Alloc.cpp,
+  GetCurrentTEB() = NtCurrentTeb() = x18). Build 241 (240 superseded while
+  running): tools/patch-fex-ios-teb-tsd.py makes the ARM64EC module's
+  GetCurrentTEB() read the TEB from the TSD slot (TPIDRRO_EL0 +
+  IosTebTsdOffset, as IOSLoadTEB does), x18 only as the fallback.
 
 ### Build 226: first green IPA after the switch (2026-09-29, run 36595079405)
 Commit 17088ab (main fast-forwarded; the automatic main run 227 cancelled).
