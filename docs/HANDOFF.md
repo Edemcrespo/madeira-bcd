@@ -85,6 +85,25 @@ makes, with the reason and the evidence), `docs/WOW64.md`, `docs/BUILDING.md`.
     "Madeira 0.1.258 signed ... kurulum-0.1.258.html written to the private
     bucket (links valid until 2026-10-07 16:07 UTC)". Waiting on the owner's
     Crysis Remastered retry log.
+  - **Owner, 2026-09-30 ~19:30 UTC+3, build 256:** 32-bit Crysis D3D10 tree
+    streaks exactly as before -- the cb-short and idx-align fixes (now covering
+    GpuManaged buffers) changed nothing visible (the log of that run has not
+    been sent yet; ask for it to see whether their `encode:` counters fired).
+    God of War: unchanged by the upstream merge, still dies of memory a
+    little into play; the owner has not tried the memory swap setting yet.
+  - **New lead for the tree streaks (build 259):** airconv's DXBC vertex fetch
+    (dxbc_converter_basicblock.cpp) pulls attributes from base + stride*index
+    with no bound, although the table entry carries the binding's length;
+    the D3D9 path (dxso_compile.cpp, upstream) clamps to it -- and `-dx9`
+    renders the trees correctly. D3D10 defines an out-of-range fetch as zero;
+    Metal reads on. tools/patch-dxmt-vfetch-bounds.py (new, step "Patch DXMT
+    vertex fetch bounds") routes a DXBC fetch at/past the length to the
+    existing null-binding branch (zeros), logs `[vfetch-bounds] ... on` once,
+    `MADEIRA_VFETCH_BOUNDS=0` turns it off, and bumps kDXMTShaderCacheVersion
+    15 -> 16 so already-converted shaders are converted again (32-bit farm
+    only; the committed 64-bit PE d3d11.dll keeps 15). airconv is native
+    (dxmt-ios), so this reaches 64-bit D3D11 games too; D3D12 (God of War) is
+    not touched. Not compiled locally (no LLVM 15 headers here): CI is the check.
 
 ---
 
