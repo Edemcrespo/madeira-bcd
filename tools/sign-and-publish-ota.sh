@@ -11,6 +11,14 @@
 #                           at its root; the signed builds go to its ota/ folder
 #   SIGN_P12_PASSWORD       the .p12 password
 #
+# Optional, so the owner need not log in to B2 at all: with these three the
+# install page's own 7-day pre-signed link is e-mailed to the owner (Gmail /
+# Google Workspace SMTP, STARTTLS on smtp.gmail.com:587). Tapping it in Mail
+# opens the page in Safari without any login; "Yükle" installs.
+#   OTA_MAIL_USER           the sending Gmail/Workspace address
+#   OTA_MAIL_APP_PASSWORD   an app password of that account (not its password)
+#   OTA_MAIL_TO             where to send it (usually the same address)
+#
 # Nothing is public. The IPA, its manifest and kurulum-<version>.html (the install page)
 # sit in the private bucket; the page's button and the manifest carry 7-day
 # pre-signed URLs, the longest S3 allows. The owner opens kurulum-<version>.html from the
@@ -195,3 +203,35 @@ for n in sorted(names, key=key)[:-10]:
   done || true
 
 echo "::notice::OTA: Madeira $VERSION signed (profile expires $EXPIRES); kurulum-$VERSION.html written to the private bucket (links valid until $UNTIL)"
+
+# --- e-mail the install page's link (optional) -----------------------------------
+if [ -n "${OTA_MAIL_USER:-}" ] && [ -n "${OTA_MAIL_APP_PASSWORD:-}" ] && [ -n "${OTA_MAIL_TO:-}" ]; then
+  PAGE_URL="$(presign "s3://$B2_SIGN_BUCKET/kurulum-$VERSION.html")"
+  if PAGE_URL="$PAGE_URL" VERSION="$VERSION" BUILD="$BUILD" UNTIL="$UNTIL" python3 - <<'PY'
+import html, os, smtplib, ssl
+from email.message import EmailMessage
+v, b, until, url = os.environ["VERSION"], os.environ["BUILD"], os.environ["UNTIL"], os.environ["PAGE_URL"]
+m = EmailMessage()
+m["Subject"] = f"Madeira {v} kuruluma hazır"
+m["From"] = os.environ["OTA_MAIL_USER"]
+m["To"] = os.environ["OTA_MAIL_TO"]
+m.set_content(f"Madeira {v} (build {b}) imzalandı.\n\nKurulum sayfası (iPhone'da aç, \"Yükle\"ye dokun):\n{url}\n\nLink {until} tarihine kadar geçerli.\n")
+m.add_alternative(
+    f'<p>Madeira <b>{html.escape(v)}</b> (build {html.escape(b)}) imzalandı.</p>'
+    f'<p><a href="{html.escape(url)}" style="display:inline-block;padding:12px 24px;border-radius:10px;'
+    f'background:#0a84ff;color:#fff;text-decoration:none;font-weight:600">Kurulum sayfasını aç</a></p>'
+    f'<p style="color:#888">Açılan sayfada "Yükle"ye dokun. Link {html.escape(until)} tarihine kadar geçerli.</p>',
+    subtype="html")
+with smtplib.SMTP("smtp.gmail.com", 587, timeout=60) as s:
+    s.starttls(context=ssl.create_default_context())
+    s.login(os.environ["OTA_MAIL_USER"], os.environ["OTA_MAIL_APP_PASSWORD"])
+    s.send_message(m)
+PY
+  then
+    echo "::notice::OTA: install link for $VERSION e-mailed to the owner"
+  else
+    echo "::warning::OTA: e-mailing the install link failed (check OTA_MAIL_* secrets; the page is still in the bucket)"
+  fi
+else
+  echo "OTA: no OTA_MAIL_* secrets -- install page only in the bucket"
+fi

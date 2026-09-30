@@ -1356,6 +1356,9 @@ jobs:
           B2_S3_ENDPOINT: ${{ secrets.B2_S3_ENDPOINT }}
           B2_SIGN_BUCKET: ${{ secrets.B2_SIGN_BUCKET }}
           SIGN_P12_PASSWORD: ${{ secrets.SIGN_P12_PASSWORD }}
+          OTA_MAIL_USER: ${{ secrets.OTA_MAIL_USER }}
+          OTA_MAIL_APP_PASSWORD: ${{ secrets.OTA_MAIL_APP_PASSWORD }}
+          OTA_MAIL_TO: ${{ secrets.OTA_MAIL_TO }}
         run: bash tools/sign-and-publish-ota.sh build-out/Madeira-0.1.${{ github.run_number }}-unsigned.ipa ${{ github.run_number }}
 
       # Update packs (tools/pack-index.py): record this build's native ABI in

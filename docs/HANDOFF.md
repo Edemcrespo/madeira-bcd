@@ -104,6 +104,11 @@ makes, with the reason and the evidence), `docs/WOW64.md`, `docs/BUILDING.md`.
     only; the committed 64-bit PE d3d11.dll keeps 15). airconv is native
     (dxmt-ios), so this reaches 64-bit D3D11 games too; D3D12 (God of War) is
     not touched. Not compiled locally (no LLVM 15 headers here): CI is the check.
+  - **OTA link by e-mail** (section 2b): owner asked for Google Drive instead of
+    the B2 login; Drive cannot host an OTA install, so CI now e-mails the
+    install page's pre-signed link when the OTA_MAIL_* secrets exist (added
+    after build 259 was dispatched, so it rides the next build). Open: owner
+    creates the app password and the three secrets.
 
 ---
 
@@ -208,6 +213,17 @@ is re-upstreaming them as `pr/fastsync-opt-in`, `pr/async-apc-requeue`,
   script never prints a URL or key. A public/unlisted bucket was refused by the
   session's safety check (the IPA contains Apple's converter library and the
   owner's device-bound profile) -- do not reintroduce it.
+* **E-mail delivery (added 2026-09-30, owner found the B2 login tedious and
+  asked about Google Drive):** Drive cannot serve the OTA itself -- iOS's
+  installer fetches the manifest/IPA without any login, so a Drive file would
+  have to be shared publicly (refused above), and Drive answers large files
+  (>100 MB) with an HTML virus-scan page instead of the bytes. Instead, when
+  the secrets `OTA_MAIL_USER` (sending Gmail/Workspace address),
+  `OTA_MAIL_APP_PASSWORD` (an app password, not the account password) and
+  `OTA_MAIL_TO` exist, the script e-mails the owner a 7-day pre-signed link to
+  `kurulum-<ver>.html` (smtp.gmail.com:587, STARTTLS); it opens in Safari with
+  no login, "Yükle" installs. The address stays in secrets (public repo); the
+  log only says "install link ... e-mailed". A mail failure is a warning only.
 * Signing keeps the IPA's own bundle ids (`com.willfaust.mythicemu`, extension
   `.MemoryHost`), like the owner's Feather install, so an OTA install updates
   the installed app in place. `SIGN_USE_PROFILE_BUNDLE_ID=1` would rename to
