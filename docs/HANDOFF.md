@@ -102,13 +102,27 @@ makes, with the reason and the evidence), `docs/WOW64.md`, `docs/BUILDING.md`.
     `MADEIRA_VFETCH_BOUNDS=0` turns it off, and bumps kDXMTShaderCacheVersion
     15 -> 16 so already-converted shaders are converted again (32-bit farm
     only; the committed 64-bit PE d3d11.dll keeps 15). airconv is native
-    (dxmt-ios), so this reaches 64-bit D3D11 games too; D3D12 (God of War) is
-    not touched. Not compiled locally (no LLVM 15 headers here): CI is the check.
+    (dxmt-ios), so this reaches 64-bit D3D11 games too (see the correction
+    below: God of War is D3D11; limited to SM 4.x shaders in build 260). Not compiled locally (no LLVM 15 headers here): CI is the check.
   - **OTA link by e-mail** (section 2b): owner asked for Google Drive instead of
     the B2 login; Drive cannot host an OTA install, so CI now e-mails the
     install page's pre-signed link when the OTA_MAIL_* secrets exist (added
     after build 259 was dispatched, so it rides the next build). Open: owner
     creates the app password and the three secrets.
+  - **Log 2026-09-30 19:01 (named GoW.exe, build 256) is God of War, not the
+    Crysis D3D10 run** (still missing): GoW reached the main menu on fastsync
+    (inproc-sync unset -- Madsync was NOT selected) and idled there 18 min
+    without dying. Memory at the menu: phys footprint ~7.7 GB (internal 4.1 GB
+    + 2.35 GB compressed + 0.5 GB external), flat for the whole idle -- no
+    leak at idle, but the menu alone sits just under the limit, so any
+    gameplay allocation tips it over. DXMT census at the menu: METAL
+    currentAllocatedSize 1.5 GB (tex-private 579 MB, buffers 793 MB), so most
+    of the footprint is not GPU resources. **Correction:** God of War runs
+    D3D11 through DXMT (mem-census), not D3D12 -- so the vertex-fetch-bounds
+    change in airconv would have reached it. The patch now applies by default
+    only to SM 4.x (D3D10-era) vertex shaders; GoW's SM 5.0 shaders convert
+    exactly as before (MADEIRA_VFETCH_BOUNDS=1 all, =0 none). Build 259 (all
+    shaders) was superseded by build 260 with this.
 
 ---
 
