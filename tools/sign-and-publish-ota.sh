@@ -18,11 +18,12 @@
 # public, so nothing here prints a URL or key material (GitHub masks secrets).
 # The certificate files never enter the repository.
 #
-# The signing mirrors what Feather/zsign do on the phone: the app takes the
-# profile's App ID as its bundle identifier (so an install over a Feather one
-# is an update that keeps the app's data), every app extension becomes
-# <that id>.<its own last component> signed with the same profile, and every
-# nested dylib/framework is re-signed.
+# The signing mirrors the owner's Feather setup: the app and its extensions
+# KEEP their own bundle identifiers (the installed Madeira has the IPA's own
+# id, so an OTA install updates it in place and keeps its data); only the
+# signature, the embedded profile and the entitlements change, and every
+# nested dylib/framework is re-signed. SIGN_USE_PROFILE_BUNDLE_ID=1 instead
+# renames them to the profile's App ID (<id>, <id>.<extension suffix>).
 #
 # Usage: tools/sign-and-publish-ota.sh <unsigned.ipa> <build number>
 set -euo pipefail
@@ -86,8 +87,10 @@ sign() {  # sign <path> [entitlements]
   fi
 }
 
-prepare_bundle() {  # prepare_bundle <bundle> <new id>
-  /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $2" "$1/Info.plist"
+prepare_bundle() {  # prepare_bundle <bundle> <profile-derived id>
+  if [ "${SIGN_USE_PROFILE_BUNDLE_ID:-0}" = "1" ]; then
+    /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $2" "$1/Info.plist"
+  fi
   rm -rf "$1/_CodeSignature"
   cp "$W/profile.mobileprovision" "$1/embedded.mobileprovision"
 }
@@ -108,6 +111,7 @@ done
 
 prepare_bundle "$APP" "$BUNDLE_ID"
 sign "$APP" "$W/ent.plist"
+APP_ID_INSTALLED="$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP/Info.plist")"
 codesign --verify --deep --strict "$APP"
 
 SIGNED="$W/Madeira-$VERSION.ipa"
@@ -139,7 +143,7 @@ cat > "$W/manifest.plist" <<EOF
       </array>
       <key>metadata</key>
       <dict>
-        <key>bundle-identifier</key><string>$BUNDLE_ID</string>
+        <key>bundle-identifier</key><string>$APP_ID_INSTALLED</string>
         <key>bundle-version</key><string>$VERSION</string>
         <key>kind</key><string>software</string>
         <key>title</key><string>Madeira $VERSION</string>
