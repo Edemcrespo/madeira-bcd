@@ -129,8 +129,10 @@ makes, with the reason and the evidence), `docs/WOW64.md`, `docs/BUILDING.md`.
     *login*; the IPA, manifest and signing files still live in the private B2
     bucket and the mailed link points there. Removing B2 needs another private
     store with expiring direct HTTPS links -- Google Cloud Storage (signed
-    URLs; Google Cloud, not Drive) could replace it. Pending owner's choice;
-    do not remove B2 before a replacement works.
+    URLs; Google Cloud, not Drive) could replace it. **Owner's decision
+    (2026-09-30 evening): keep Backblaze + the Gmail e-mail** (no migration);
+    the owner adds the OTA_MAIL_* secrets in the morning from a PC. Do not
+    remove B2.
   - **Crysis Remastered, log 2026-09-30 19:29, build 258:** the vulkan-1 fix
     worked -- the game starts, shows its menu, "New game" loads to 100 %, then
     dies. Before it: 15 x "DeviceTexture: Failed to register mach port for
