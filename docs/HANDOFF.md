@@ -720,6 +720,18 @@ same game was never tested here.
   logs every register, 256 bytes of host code before the fault
   ([fault-full], [fault-host]) and the guest bytes of the two innermost
   frames and their direct-call targets ([guest-fn]).
+* Build 236 (log 2026-09-30 09:28) names it. A static constructor
+  (0x14002c4e0, from the CRT's initterm at 0x140664xxx) builds a global at
+  0x1427d27f0 with ctor 0x14017d750, which allocates 0x1000 bytes through
+  the thread's current allocator: GoW.exe's own TLS block (TLS[0]) holds an
+  index at +0xc and a table at +0xf0; the index is negative or the entry is
+  0, so the allocator is NULL. 0x14040bf10 then finds TLS[0]+0x18 == 0 too
+  (the other path) and reads NULL->0x40. The TLS setup order is identical
+  in the pre-switch log that passes this point, so an earlier initializer
+  took another path. Only visible difference at that point: the 2 MB commit
+  at the start of the 1026 MB reservation was swap-backed there
+  (swap-min-kb 1024) and is plain memory now. Next test: swap-min-kb = 1024
+  back in GoW's config.
 
 ### Build 226: first green IPA after the switch (2026-09-29, run 36595079405)
 Commit 17088ab (main fast-forwarded; the automatic main run 227 cancelled).
