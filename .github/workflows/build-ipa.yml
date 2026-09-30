@@ -893,6 +893,14 @@ jobs:
       - name: Patch DXMT with DXIL tessellation emulation
         run: python3 tools/patch-dxmt-dxil-tess.py
 
+      # D3D reads past the end of a short constant buffer as 0; Metal reads the
+      # next bytes. Zero-padded copies for such bindings (32-bit Crysis's
+      # D3D10 renderer throws vertices far out without it) and an index-offset
+      # alignment census. Runs before the i386 farm, which is keyed on these
+      # patch scripts.
+      - name: Patch DXMT constant buffers bound short
+        run: python3 tools/patch-dxmt-cb-short.py
+
       # WoW64's 32-bit Windows farm (app/Madeira/i386-windows), which upstream
       # builds from the pinned wine and DXMT (build/wine-i386) and does not
       # commit. Cached per wine/DXMT revision; a failure only leaves 32-bit

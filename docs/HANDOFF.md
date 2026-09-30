@@ -882,6 +882,16 @@ same game was never tested here.
   grow it without updating both); (2) 16-bit index buffer offsets that are
   2 mod 4 (odd StartIndexLocation) passed straight to Metal. The -dx9
   comparison is still pending.
+* -dx9 renders Crysis correctly (owner, 2026-09-30) but at ~28 FPS instead of
+  ~55-60 (the S25 Ultra runs it at ~110 FPS with DXVK 2.7.1), so the D3D10
+  path is the one to fix. Build 248: tools/patch-dxmt-cb-short.py parses each
+  shader's dcl_constantbuffer sizes (SHDR/SHEX, no airconv ABI change); a
+  bound buffer shorter than declared gets a zero-padded copy in the encoder's
+  argument buffer, refreshed every draw ([cb-short] lines), and 16-bit index
+  offsets that are not a multiple of 4 are counted ([idx-align], log only).
+  It only reaches 32-bit games: the i386 farm is rebuilt from research/dxmt,
+  the 64-bit PE d3d11.dll is still the committed binary. If [cb-short] never
+  appears, candidate (1) is refuted.
 
 ### Build 226: first green IPA after the switch (2026-09-29, run 36595079405)
 Commit 17088ab (main fast-forwarded; the automatic main run 227 cancelled).
