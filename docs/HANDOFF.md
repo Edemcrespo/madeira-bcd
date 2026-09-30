@@ -682,6 +682,32 @@ tracked DLL and stay green).
   build and never lost the old ones; entries of earlier builds are removed
   once per build (log: `DXBC shader cache: removed N entries`).
 
+### Builds 228-233: God of War hangs at start (presents 0), 2026-09-29/30
+Tried and ruled out one by one on the device (each a separate build): madsync
+off, 125hz's early JIT pool (6c944a6: upstream's placement again),
+swap-min-kb, 125hz's decommit_pages (0046bce). Upstream's own build of the
+same game was never tested here.
+* Build 230 (2f8a0f4): the 2 s watchdog prints `[guest-stk]` lines for a
+  thread parked in a syscall (TEB+0x378 syscall frame, fp chain, stack scan,
+  JIT addresses reverse-mapped to module+offset). FEX offsets are symbolized
+  with `llvm-nm -n -C` of the SHIPPED xtajit64.dll (RVA = addr - 0x180000000);
+  since build 231 the shipped module is a CI rebuild, so the committed DLL's
+  symbols are off by a few hundred bytes after Module.cpp.
+* Build 231 (3705656, tools/patch-fex-ios-mapview-selfshared.py): guessed a
+  self-wait on CodeInvalidationMutex in NotifyMapViewOfSection. Its log line
+  (`[img-map] madeira-bcd`) never appeared; still hangs. The patch is kept
+  (harmless).
+* The build 230 stack, symbolized properly, is a self-wait on
+  InvalidationTracker::IntervalsLock (std::shared_mutex, not recursive):
+  HandleMemoryProtectionNotification holds it and logs `[iOS-xrem]` -> the
+  log line grows FEX's heap (rpmalloc heap_get_page_generic) -> VirtualAlloc
+  -> NotifyMemoryAlloc -> HandleMemoryProtectionNotification -> the same
+  lock. Build 233 (840d90f, tools/patch-fex-ios-intervals-reentry.py): the
+  lock remembers its exclusive owner (TPIDRRO_EL0 on iOS); the memory
+  notifications return at once on that thread and are counted
+  (`[iv-reentry]` from HandleImageMap). Device test pending; then madsync and
+  swap-min-kb back on for GoW one at a time.
+
 ### Build 226: first green IPA after the switch (2026-09-29, run 36595079405)
 Commit 17088ab (main fast-forwarded; the automatic main run 227 cancelled).
 Native ABI e708a9072e35d90d, shader cache identity 1f62cb76a67abb1f: packs
