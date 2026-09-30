@@ -840,6 +840,21 @@ same game was never tested here.
   GetCurrentTEB() problem as GoW's on ARM64EC. Build 245 applies
   tools/patch-fex-ios-teb-tsd.py to the WOW64 module too (its IosTebTsdOffset
   is published into the same extern "C" variable).
+  (That build ran as run 246, e449b17; main fast-forwarded to it.)
+* Crysis intro videos, 30 s pause between each (same log, owner: "every gap
+  about a minute, the videos themselves smooth"): the gaps are exactly 30.0 s
+  of near-idle CPU (12:25:49.7 -> 12:26:19.7, 12:26:38.6 -> 12:27:08.5, ...).
+  The video thread (00b8, then 00dc) calls SuspendThread on ITSELF every frame
+  and is resumed by the main thread. On iOS a self-suspend never stops the
+  thread (SIGUSR1 never reaches usr1_handler, task #32), so it spun ~46k
+  SuspendThread/s and the server count sat at MAXIMUM_SUSPEND_COUNT
+  ([srv-suspend] "count 127->127"). When the video ended the thread reached
+  NtTerminateThread(self), whose zero-timeout server_select waits while the
+  thread is suspended -- forever (teb 0x7103090000 parked in
+  wait_select_reply for the rest of the log; no "read_request EOF" for 00b8
+  or 00dc), so the main thread sat out a 30 s join timeout. Build 247:
+  NtSuspendThread (build/ntdll-unix/thread_ios.c) waits like wait_suspend()
+  when the target is the calling thread ([self-suspend] log line).
 
 ### Build 226: first green IPA after the switch (2026-09-29, run 36595079405)
 Commit 17088ab (main fast-forwarded; the automatic main run 227 cancelled).
