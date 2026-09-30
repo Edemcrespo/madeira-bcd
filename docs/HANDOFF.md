@@ -708,6 +708,18 @@ same game was never tested here.
   notifications return at once on that thread and are counted
   (`[iv-reentry]` from HandleImageMap). Device test pending; then madsync and
   swap-min-kb back on for GoW one at a time.
+* Build 234 on the device (logs 2026-09-30 08:57 and 08:58): the hang is
+  gone. GoW now gets past imm32, loads concrt140/vcruntime140_1, starts its
+  job-manager threads, initialises d3d11/dxgi (video budget, the 1368 MB and
+  1026 MB reservations) and then faults the same way both times: guest code
+  reads 0x40 (host LDAPR x27,[x6], x6 = 0x40; State.RIP 0x14002c4e0, callret
+  [0] 0x14017d7a2, [1] 0x14002c4f0), host sp 0x71fe3c0000. The pre-switch
+  build (125hz, log 2026-09-29 13:48) passes the same point: the exe was
+  relocated to 0x15f210000 there, the 2 MB commit in the 1026 MB reservation
+  was swap-backed (swap-min-kb), and crs-client.dll loaded next. Build 236
+  logs every register, 256 bytes of host code before the fault
+  ([fault-full], [fault-host]) and the guest bytes of the two innermost
+  frames and their direct-call targets ([guest-fn]).
 
 ### Build 226: first green IPA after the switch (2026-09-29, run 36595079405)
 Commit 17088ab (main fast-forwarded; the automatic main run 227 cancelled).
