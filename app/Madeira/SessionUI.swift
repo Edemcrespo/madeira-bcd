@@ -148,10 +148,17 @@ struct SessionPanelView: View {
                     }
                     .onChange(of: fit) { _, value in DisplayFit.current = value }
                     Toggle("Performance overlay", isOn: $session.showPerformance)
+                } header: {
+                    Text("Display")
+                }
+
+                // madeira-bcd: ECO sets which CPU cores the game's threads run on, so it has
+                // its own section instead of sitting under Display.
+                Section {
                     Toggle("Battery saver (ECO)", isOn: $eco)
                         .onChange(of: eco) { _, on in madeira_set_eco(on ? 1 : 0) }
                 } header: {
-                    Text("Display")
+                    Text("CPU")
                 } footer: {
                     Text("ECO runs the game's threads at a low priority, on the efficiency cores. It is not a "
                          + "frame cap: use it while a game loads, so the phone keeps its heat budget for "

@@ -919,6 +919,17 @@ same game was never tested here.
   4-byte aligned place in the argument buffer (MADEIRA_IDX_REALIGN=0 = off).
   The ECO toggle is in the session menu (Battery saver (ECO)) and the ECO pill
   of the Madeira performance overlay, not in Apple's Metal HUD.
+* Upstream merge 2026-09-30 (100 commits up to fdbdef7, "round 3"): Steam
+  owned library (sign-in, downloads, installs), fastsync as the DEFAULT sync
+  engine (madsync only with inproc-sync = 1; Settings > Sync engine), NSI
+  network tables and dnsapi unixlib, Dock GDI table for 32-bit programs, touch
+  control glass faces, rebuilt 64-bit/aarch64 DLLs; pins FEX 26859e1 (#5:
+  CPUID table bound -- tools/patch-fex-ios-cpuid-index.py now detects it and
+  does nothing), wine 4f5b197, madeira-dock 3cadfbe. Kept ours: game cfg
+  env block before the fastsync default (a game's env.MADEIRA_FASTSYNC wins),
+  pointerMax, the JIT-pool second-session guard, the controls opacity, the
+  memory-pool picker and MemoryHostTest row. The session menu's ECO toggle
+  moved from Display to its own CPU section (the owner looked for it there).
 
 ### Build 226: first green IPA after the switch (2026-09-29, run 36595079405)
 Commit 17088ab (main fast-forwarded; the automatic main run 227 cancelled).

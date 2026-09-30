@@ -21,6 +21,10 @@ marker = "madeira-bcd: CPU index wrapped into PerCPUData"
 if marker in src:
     print("already patched")
     sys.exit(0)
+if "CurrentCPUIndex()" in src and "WrapCPUIndex" in open(path.replace("CPUID.cpp", "CPUID.h")).read():
+    # FEX #5 (125hz/pr/cpuid-table-bound, pinned 2026-09-30) bounds the index itself.
+    print("CPUID.cpp: FEX bounds the per-CPU index itself (CurrentCPUIndex); nothing to do")
+    sys.exit(0)
 
 edits = [
     ("""FEXCore::CPUID::FunctionResults CPUIDEmu::Function_8000_0002h(uint32_t Leaf) const {
