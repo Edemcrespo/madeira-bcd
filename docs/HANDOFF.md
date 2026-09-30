@@ -930,6 +930,16 @@ same game was never tested here.
   pointerMax, the JIT-pool second-session guard, the controls opacity, the
   memory-pool picker and MemoryHostTest row. The session menu's ECO toggle
   moved from Display to its own CPU section (the owner looked for it there).
+* Build 251 on device (log 16:37): [main-qos] rc=0 class 0x21 -- the guest
+  main thread now runs on P-cores (0024 ~300 ms P per 300 ms), so that fix
+  works. The tree streaks are unchanged, but neither DXMT fix had actually
+  run for most draws: both skipped GpuManaged allocations, and Crysis's
+  static buffers are GpuManaged (578 of 653 buffers, [mem-census]). On iOS a
+  GpuManaged buffer is CpuPlaced and Managed does not exist, so the CPU
+  mapping IS the storage; the next build copies from it too and logs
+  "encode: realigned / zero-padded copy bound / skipped" counts. The session
+  menu the owner uses in a game is LibraryHUD's (Library.swift), not
+  SessionUI's: the ECO toggle now also sits there under a CPU heading.
 
 ### Build 226: first green IPA after the switch (2026-09-29, run 36595079405)
 Commit 17088ab (main fast-forwarded; the automatic main run 227 cancelled).

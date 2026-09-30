@@ -2347,6 +2347,8 @@ struct LibraryHUD: View {
     /// A Madeira Dock start: its status, failure and Show desktop (DockStartScreen).
     @ObservedObject private var dockStart = DockStartScreen.shared
     private let sessionTools = MadeiraConfig.flag("MADEIRA_SESSION_TOOLS")
+    /// madeira-bcd: the live ECO switch (guest threads to the efficiency cores).
+    @State private var eco = madeira_get_eco() != 0
     @State private var launchVisible = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     var body: some View {
@@ -2526,6 +2528,15 @@ struct LibraryHUD: View {
                         }.pickerStyle(.menu).labelsHidden()
                     }
                 }
+                Divider()
+                // madeira-bcd: ECO decides which CPU cores the game's threads run on,
+                // so it has its own heading rather than sitting with the display options.
+                Text("CPU").font(.headline)
+                Toggle("Battery saver (ECO)", isOn: Binding(get: { eco }, set: { on in
+                    eco = on; madeira_set_eco(on ? 1 : 0)
+                }))
+                Text("Runs the game's threads on the efficiency cores: cooler and slower. Use it while a game loads, turn it off to play.")
+                    .font(.caption).foregroundStyle(.secondary)
                 Divider()
                 Text("Mouse & pointer").font(.headline)
                 LibraryPointerSettings()

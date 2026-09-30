@@ -52,11 +52,19 @@ edit("dxmt/dxmt_context.hpp", [
   realignIndexRange(WMT::Buffer &buf, uint64_t &off, uint64_t pad_off, uint64_t bytes) {
     auto [alloc, suboff] = access<true>(ibuf_, 0, ibuf_->length(), DXMT_ENCODER_RESOURCE_ACESS_READ);
     (void)suboff;
-    if (alloc->flags().test(BufferAllocationFlag::GpuManaged))
-      return false;
+    /* The CPU mapping is the buffer's storage on iOS (unified memory; a
+     * GpuManaged buffer is CpuPlaced and Managed does not exist there). */
+    static unsigned copied, nomap, oob;
     auto src = (const char *)alloc->mappedMemory(0);
-    if (!src || off + bytes > alloc->length())
+    if (!src || off + bytes > alloc->length()) {
+      unsigned n = !src ? ++nomap : ++oob;
+      if (n <= 4 || (n & 0xffff) == 0)
+        WARN("[idx-align] madeira-bcd encode: realign skipped (", !src ? "no CPU mapping" : "range past the buffer",
+             ", #", n, ")");
       return false;
+    }
+    if (++copied <= 4 || (copied & 0xfffff) == 0)
+      WARN("[idx-align] madeira-bcd encode: realigned (#", copied, ", ", bytes, " bytes)");
     memcpy(getMappedArgumentBuffer<char>(pad_off), src + off, bytes);
     buf = getFinalArgumentBuffer();
     off = getFinalArgumentBufferOffset(pad_off);

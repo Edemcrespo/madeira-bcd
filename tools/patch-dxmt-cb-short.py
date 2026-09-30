@@ -185,9 +185,16 @@ ENC_NEW = """      auto argbuf = cbuf.buffer;
        * past the end of a constant buffer as 0; Metal would read the next bytes. */
       if (short_cb && arg.SM50BindingSlot < 14 && short_cb[2 * arg.SM50BindingSlot]) {
         uint32_t pad_off = short_cb[2 * arg.SM50BindingSlot] - 1, pad_bytes = short_cb[2 * arg.SM50BindingSlot + 1];
-        /* GpuManaged: the CPU mapping is not the GPU's copy; leave those as they were */
-        auto src = argbuf_alloc->flags().test(BufferAllocationFlag::GpuManaged)
-                       ? nullptr : (const char *)argbuf_alloc->mappedMemory(0);
+        /* The CPU mapping is the buffer's storage on iOS (unified memory; a
+         * GpuManaged buffer is CpuPlaced and Managed does not exist there). */
+        auto src = (const char *)argbuf_alloc->mappedMemory(0);
+        static unsigned madeira_cb_copied, madeira_cb_nomap;
+        if (!src) {
+          if (++madeira_cb_nomap <= 4 || (madeira_cb_nomap & 0xffff) == 0)
+            WARN("[cb-short] madeira-bcd encode: no CPU mapping, copy skipped (#", madeira_cb_nomap, ")");
+        } else if (++madeira_cb_copied <= 4 || (madeira_cb_copied & 0xfffff) == 0) {
+          WARN("[cb-short] madeira-bcd encode: zero-padded copy bound (#", madeira_cb_copied, ", ", pad_bytes, " bytes)");
+        }
         if (src) {
           char *dst = getMappedArgumentBuffer<char, stage == PipelineStage::Compute>(pad_off);
           size_t have = valid_length < pad_bytes ? valid_length : pad_bytes;
