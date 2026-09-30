@@ -60,6 +60,26 @@ makes, with the reason and the evidence), `docs/WOW64.md`, `docs/BUILDING.md`.
     the cb-short/idx-align DXMT patches (i386 farm) do not apply to it.
     (Correction: pushing HANDOFF to main does not start a build -- build-ipa.yml
     runs on push only when the workflow file itself changes.)
+    (Second correction: the first push of 6e6f4c8 to main DID start run 257,
+    because main's previous head predates workflow changes that 6e6f4c8 carries;
+    run 257 was a duplicate of 256 and is superseded by build 258.)
+  - **Crysis Remastered (64-bit, Steam app 1715130) crash, log 2026-09-30
+    18:42, build 256:** it reaches its window ("Crysis Remastered", 1024x768)
+    and creates 23 DXMT D3D11 devices (FL 11_0), then its RenderThread (tid
+    0108) calls RIP=0 with RCX = a stack pointer (`vkEnumerateInstanceVersion(&v)`
+    shape; the host backtrace's first frame is vulkan-1.dll's base) ->
+    c0000005 -> process exit; the later faults at 0x15a534000 /
+    0x71f5771508 in xtajit64.dll are only fallout of the teardown (the JIT
+    pool of the dead process was reclaimed while its threads ran). Cause: our
+    vulkan-1.dll stand-in (tools/build-stub-dlls.py) returned NULL from
+    vkGetInstanceProcAddr for everything, while the real Khronos loader always
+    returns the global commands even with no driver. **Fix (build 258):** the
+    stand-in now implements vkEnumerateInstanceVersion (1.3), empty instance
+    extension/layer lists, vkCreateInstance -> VK_ERROR_INCOMPATIBLE_DRIVER,
+    and vkGetInstanceProcAddr returns those five global commands (NULL for the
+    rest), with real C prototypes so the arm64ec entry thunks pass arguments.
+    Checked locally: the generated C compiles for arm64ec. Open: device test;
+    if it still dies, look for the next NULL call in the same place.
 
 ---
 
