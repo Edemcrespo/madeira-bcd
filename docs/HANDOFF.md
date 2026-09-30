@@ -40,6 +40,8 @@ makes, with the reason and the evidence), `docs/WOW64.md`, `docs/BUILDING.md`.
     engine to Madsync in its game settings.
   - **Upstream round 3 merged** (100 commits, Steam library, fastsync default,
     FEX 26859e1 / wine 4f5b197 / dock 3cadfbe).
+  - Build 254 (merge) failed on nsi_ndis/nsi_ip (HAVE_NET_ROUTE_H, fixed in
+    the next build).
   - **OTA install** set up (section 2b). ECO toggle is in the in-game Session
     menu under "CPU" (LibraryHUD in Library.swift).
 
@@ -997,6 +999,15 @@ same game was never tested here.
   "encode: realigned / zero-padded copy bound / skipped" counts. The session
   menu the owner uses in a game is LibraryHUD's (Library.swift), not
   SessionUI's: the ECO toggle now also sits there under a CPU heading.
+* Build 254 (7fe376d, first build of the round-3 merge) FAILED at "Verify all
+  linked archives exist": libntdll_unix.a was not built because upstream's new
+  nsi_ndis_ios.c / nsi_ip_ios.c did not compile -- RTM_IFINFO, RTA_IFP and
+  RTF_LLINFO undeclared. Our CI configures Wine against the iPhoneOS SDK
+  (no <net/route.h>), so HAVE_NET_ROUTE_H is undefined and ndis.c/ip.c never
+  include upstream's shims/net/route.h (upstream builds with a macOS-configured
+  config.h). Fix: both wrappers define HAVE_NET_ROUTE_H when config.h does
+  not. (How the error was found: the job log is only 2649 lines; get_job_logs
+  with tail_lines=2649 saves it to a file that can be grepped.)
 
 ### Build 226: first green IPA after the switch (2026-09-29, run 36595079405)
 Commit 17088ab (main fast-forwarded; the automatic main run 227 cancelled).
