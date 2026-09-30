@@ -123,6 +123,14 @@ makes, with the reason and the evidence), `docs/WOW64.md`, `docs/BUILDING.md`.
     only to SM 4.x (D3D10-era) vertex shaders; GoW's SM 5.0 shaders convert
     exactly as before (MADEIRA_VFETCH_BOUNDS=1 all, =0 none). Build 259 (all
     shaders) was superseded by build 260 with this.
+  - **Owner, 2026-09-30 evening:** will set up the Gmail app password and the
+    OTA_MAIL_* secrets in the morning, and wants to "delete Backblaze from the
+    workflow" once mail works. Told the owner: the e-mail only replaces the B2
+    *login*; the IPA, manifest and signing files still live in the private B2
+    bucket and the mailed link points there. Removing B2 needs another private
+    store with expiring direct HTTPS links -- Google Cloud Storage (signed
+    URLs; Google Cloud, not Drive) could replace it. Pending owner's choice;
+    do not remove B2 before a replacement works.
 
 ---
 
