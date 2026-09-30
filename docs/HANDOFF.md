@@ -139,8 +139,11 @@ is re-upstreaming them as `pr/fastsync-opt-in`, `pr/async-apc-requeue`,
   `B2_S3_ENDPOINT` (`s3.eu-central-003.backblazeb2.com`), `B2_SIGN_BUCKET`
   (`Github-BCD`), `SIGN_P12_PASSWORD`. The key is limited to that bucket.
 * Output: `ota/Madeira-<ver>.ipa` + `ota/manifest-<ver>.plist` (last 10 kept)
-  and `kurulum.html` at the bucket root with a "Yükle" button; links are 7-day
-  pre-signed URLs. The owner opens `kurulum.html` from the B2 panel/app.
+  and `kurulum-<ver>.html` at the bucket root with a "Yükle" button (owner
+  asked for the version in the name, 2026-09-30; the last 10 are kept); links
+  are 7-day pre-signed URLs. The owner opens the newest `kurulum-<ver>.html`
+  from the B2 panel/app; tapping "Yükle" makes the iPhone download
+  `ota/Madeira-<ver>.ipa` straight from the same private bucket.
 * **Nothing is public:** the repo and its Actions logs are public, so the
   script never prints a URL or key. A public/unlisted bucket was refused by the
   session's safety check (the IPA contains Apple's converter library and the

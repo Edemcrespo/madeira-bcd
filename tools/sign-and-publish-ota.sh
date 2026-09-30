@@ -11,9 +11,9 @@
 #                           at its root; the signed builds go to its ota/ folder
 #   SIGN_P12_PASSWORD       the .p12 password
 #
-# Nothing is public. The IPA, its manifest and kurulum.html (the install page)
+# Nothing is public. The IPA, its manifest and kurulum-<version>.html (the install page)
 # sit in the private bucket; the page's button and the manifest carry 7-day
-# pre-signed URLs, the longest S3 allows. The owner opens kurulum.html from the
+# pre-signed URLs, the longest S3 allows. The owner opens kurulum-<version>.html from the
 # B2 panel or app and taps "Yükle". The repository and its Actions logs are
 # public, so nothing here prints a URL or key material (GitHub masks secrets).
 # The certificate files never enter the repository.
@@ -158,7 +158,7 @@ MANIFEST_URL="$(presign "$B/manifest-$VERSION.plist")"
 ENC="$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$MANIFEST_URL")"
 UNTIL="$(date -u -v+7d '+%Y-%m-%d %H:%M UTC' 2>/dev/null || date -u -d '+7 days' '+%Y-%m-%d %H:%M UTC')"
 
-cat > "$W/kurulum.html" <<EOF
+cat > "$W/kurulum-$VERSION.html" <<EOF
 <!doctype html>
 <html lang="tr"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -178,9 +178,9 @@ p{color:#aaa;font-size:14px}
 <p>Dokun, ardından "Yükle"yi onayla. Link $UNTIL tarihine kadar geçerli.</p>
 </div></body></html>
 EOF
-s3 cp "$W/kurulum.html" "s3://$B2_SIGN_BUCKET/kurulum.html" --content-type "text/html; charset=utf-8" --cache-control no-cache
+s3 cp "$W/kurulum-$VERSION.html" "s3://$B2_SIGN_BUCKET/kurulum-$VERSION.html" --content-type "text/html; charset=utf-8" --cache-control no-cache
 
-# Keep the last ten builds (IPA + manifest); older ones stay in the Actions artifacts.
+# Keep the last ten builds (IPA + manifest + install page); older ones stay in the Actions artifacts.
 s3 ls "$B/" | awk '{print $4}' | python3 -c '
 import re, sys
 names = [l.strip() for l in sys.stdin if re.match(r"^Madeira-.*[.]ipa$", l.strip())]
@@ -191,6 +191,7 @@ for n in sorted(names, key=key)[:-10]:
     v="${old#Madeira-}"; v="${v%.ipa}"
     s3 rm "$B/$old" || true
     s3 rm "$B/manifest-$v.plist" || true
+    s3 rm "s3://$B2_SIGN_BUCKET/kurulum-$v.html" || true
   done || true
 
-echo "::notice::OTA: Madeira $VERSION signed (profile expires $EXPIRES); kurulum.html updated in the private bucket (links valid until $UNTIL)"
+echo "::notice::OTA: Madeira $VERSION signed (profile expires $EXPIRES); kurulum-$VERSION.html written to the private bucket (links valid until $UNTIL)"
