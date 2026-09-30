@@ -736,6 +736,14 @@ same game was never tested here.
   swap-backed again and the fault is unchanged -- not the swap tier. Build
   237 prints the thread's TLS[0] block and the image's TLS template at the
   first unhandled fault ([fault-tls]).
+* Build 237 (log 09:53): GoW.exe's TLS template has the allocator-stack
+  index at +0xc = -1 (empty); the main thread's block has +0xc = 0 and the
+  table at +0xf0 holds [0] = 0, [1] = 0x7158890000 (the 1026 MB arena from
+  jumbo#2). So the arena was pushed one slot too high, or something pushed
+  NULL first, or +0xc was reset to 0 before the push (a 64-bit store to +0x8
+  would do that). Other changes vs the template: +0x28 = 0x14506ce60,
+  +0x58 low dword 0x80000000 -> 0x80000005. Finding the writers needs the
+  code: GoW.exe itself (the owner's copy, analysis only, never committed).
 
 ### Build 226: first green IPA after the switch (2026-09-29, run 36595079405)
 Commit 17088ab (main fast-forwarded; the automatic main run 227 cancelled).
