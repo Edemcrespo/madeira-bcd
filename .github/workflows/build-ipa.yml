@@ -916,6 +916,13 @@ jobs:
       - name: Patch DXMT vertex fetch bounds
         run: python3 tools/patch-dxmt-vfetch-bounds.py
 
+      # iOS cannot bootstrap-register a shared texture's mach port; without a
+      # port DXMT keeps the texture unshared instead of failing its creation
+      # (Crysis Remastered died on ClearRenderTargetView(NULL) after that).
+      # Native side only, so the i386 farm cache key is not touched.
+      - name: Patch winemetal shared textures for iOS
+        run: python3 tools/patch-winemetal-ios-shared-texture.py
+
       # WoW64's 32-bit Windows farm (app/Madeira/i386-windows), which upstream
       # builds from the pinned wine and DXMT (build/wine-i386) and does not
       # commit. Cached per wine/DXMT revision; a failure only leaves 32-bit

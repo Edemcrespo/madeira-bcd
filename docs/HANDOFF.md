@@ -131,6 +131,23 @@ makes, with the reason and the evidence), `docs/WOW64.md`, `docs/BUILDING.md`.
     store with expiring direct HTTPS links -- Google Cloud Storage (signed
     URLs; Google Cloud, not Drive) could replace it. Pending owner's choice;
     do not remove B2 before a replacement works.
+  - **Crysis Remastered, log 2026-09-30 19:29, build 258:** the vulkan-1 fix
+    worked -- the game starts, shows its menu, "New game" loads to 100 %, then
+    dies. Before it: 15 x "DeviceTexture: Failed to register mach port for
+    shared texture" (CreateTexture2D with a SHARED flag -> E_FAIL, because
+    WMTBootstrapRegister/bootstrap_register2 is refused to an iOS app). Then
+    RenderThread (tid 0110) reads address 0 in d3d11.dll rva 0x885ac =
+    `MTLD3D11DeviceContextImplBase::ClearRenderTargetView` with a NULL view
+    (the committed arm64ec d3d11.dll has symbols; `llvm-objdump -d` it). Level
+    load memory: DXMT tex-private 4.5 GB, METAL currentAllocatedSize 1.9 GB.
+    **Fix (next build):** tools/patch-winemetal-ios-shared-texture.py (native
+    winemetal_unix.c, so it reaches the committed 64-bit PE too): on iOS a
+    new shared texture gets no mach port, which DXMT's existing ml866 fallback
+    turns into an unshared texture and S_OK. `[shared-tex]` logs the first 4;
+    MADEIRA_SHARED_TEXTURE_PORT=1 restores the old path. God of War creates no
+    shared textures (none in its 19:01 log). The null-RTV clear itself would
+    still crash if it came from elsewhere (DXVK ignores a NULL view; DXMT's
+    64-bit PE is a committed upstream binary, so that guard needs a PE rebuild).
 
 ---
 
