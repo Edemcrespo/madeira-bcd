@@ -787,6 +787,21 @@ same game was never tested here.
   running): tools/patch-fex-ios-teb-tsd.py makes the ARM64EC module's
   GetCurrentTEB() read the TEB from the TSD slot (TPIDRRO_EL0 +
   IosTebTsdOffset, as IOSLoadTEB does), x18 only as the fallback.
+* Crysis64 (log 2026-09-30 11:05, build 239): the same fault as every run
+  since 2026-09-26: CrySystem.dll+0x79788 reads through a pointer whose high
+  32 bits are gone (0x264d004c; the full value 0x70264d055c sits in x1).
+  CryEngine 2's 64-bit build relies on heap addresses below 4 GB, which
+  Windows' bottom-up allocation gives it; iOS reserves the whole low 4 GB as
+  __PAGEZERO, so no allocation can land there. Not fixable in the allocator;
+  32-bit Crysis is the route.
+* 32-bit Crysis (log 11:06): dies before any game code. aarch64 wow64.dll is
+  relocated off its preferred base, the loader binds its IAT (.rdata page
+  +0x33000), the read-only restore fails (`[vmem-denied] set_vprot failed
+  ... protect=0x2`), so NtProtectVirtualMemory's IAT sync into the JIT-pool
+  copy never runs; Wow64LdrpInitialize (+0x1b5fc) calls through the copy's
+  unbound slot = hint/name RVA 0x34f06. Build 242: a refused read-only restore
+  inside a pool-copied image leaves the page as it is, reports success and
+  lets the sync run ([vmem-denied] madeira-bcd: restore ... refused).
 
 ### Build 226: first green IPA after the switch (2026-09-29, run 36595079405)
 Commit 17088ab (main fast-forwarded; the automatic main run 227 cancelled).
