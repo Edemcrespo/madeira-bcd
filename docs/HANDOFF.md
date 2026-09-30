@@ -10,6 +10,39 @@ This file is for whoever continues the work (another coding agent or a
 person). Read it first, then `docs/madeira-bcd.md` (every change this fork
 makes, with the reason and the evidence), `docs/WOW64.md`, `docs/BUILDING.md`.
 
+> **MANDATORY FOR EVERY AGENT (Claude, ChatGPT/Codex, anyone) -- owner's
+> order, 2026-09-30.** The owner alternates between assistants. Every change,
+> however small -- code, CI workflow, patch script, submodule pin, config
+> default, build dispatched, device test result, owner decision, secret or
+> account set up -- MUST be written into this file **in the same commit** (or
+> the next one, before handing back to the owner): what changed, why, the
+> evidence (log time / build number), and what is still open. Append; do not
+> rewrite or delete earlier findings. If you only investigated and changed
+> nothing, still note what you found. `AGENTS.md` and `CLAUDE.md` at the
+> repository root repeat this rule. Start with section 0 (latest status).
+
+## 0. Latest status (keep this section current; newest first)
+
+* **2026-09-30 (Claude):** builds 244-252+ -- see "Builds 228-234" section for
+  the full trail. In short:
+  - 32-bit **Crysis** runs (D3D10 via DXMT, ~110 FPS unrecorded on build 249).
+    Fixed: IAT sync, CPUID index, WOW64 TEB (x18), self-suspend (30 s gaps
+    between intro videos), guest main thread QoS (it ran on E-cores only).
+    **Open:** tree/branch geometry streaks in D3D10 (`-dx9` renders correctly
+    but at ~28 FPS). Fixes in flight: zero-padded short constant buffers and
+    realigned 16-bit index ranges -- the first versions skipped GpuManaged
+    buffers and so never ran for static data; the build after 251 covers them
+    and logs `[cb-short] ... encode:` / `[idx-align] ... encode:` counts.
+  - **God of War** reaches the main menu; open issue is memory (jetsam at 8 GB).
+    The owner is tired of regressions: before a risky change, keep the last
+    good build as fallback. After the round-3 upstream merge fastsync is the
+    default sync engine; God of War so far ran on madsync -- set its sync
+    engine to Madsync in its game settings.
+  - **Upstream round 3 merged** (100 commits, Steam library, fastsync default,
+    FEX 26859e1 / wine 4f5b197 / dock 3cadfbe).
+  - **OTA install** set up (section 2b). ECO toggle is in the in-game Session
+    menu under "CPU" (LibraryHUD in Library.swift).
+
 ---
 
 ## 1. What this repository is
@@ -93,6 +126,28 @@ is re-upstreaming them as `pr/fastsync-opt-in`, `pr/async-apc-requeue`,
   main. Since build 222 upstream's side (and its submodule pins) wins where it
   replaced something we carried.
 
+## 2b. Over-the-air install (owner's decision 2026-09-30)
+
+* CI step "Sign for OTA install (private bucket)" runs
+  `tools/sign-and-publish-ota.sh` after the unsigned IPA is packaged
+  (continue-on-error; skips itself when a secret is missing).
+* The owner's signing files live ONLY in the owner's **private** Backblaze B2
+  bucket `Github-BCD` (root: `Development.p12`, `Development.mobileprovision`).
+  Repository secrets: `B2_KEY_ID` (the keyID, not the key name), `B2_APP_KEY`,
+  `B2_S3_ENDPOINT` (`s3.eu-central-003.backblazeb2.com`), `B2_SIGN_BUCKET`
+  (`Github-BCD`), `SIGN_P12_PASSWORD`. The key is limited to that bucket.
+* Output: `ota/Madeira-<ver>.ipa` + `ota/manifest-<ver>.plist` (last 10 kept)
+  and `kurulum.html` at the bucket root with a "Yükle" button; links are 7-day
+  pre-signed URLs. The owner opens `kurulum.html` from the B2 panel/app.
+* **Nothing is public:** the repo and its Actions logs are public, so the
+  script never prints a URL or key. A public/unlisted bucket was refused by the
+  session's safety check (the IPA contains Apple's converter library and the
+  owner's device-bound profile) -- do not reintroduce it.
+* Signing keeps the IPA's own bundle ids (`com.willfaust.mythicemu`, extension
+  `.MemoryHost`), like the owner's Feather install, so an OTA install updates
+  the installed app in place. `SIGN_USE_PROFILE_BUNDLE_ID=1` would rename to
+  the profile's App ID instead.
+
 ## 3. Hard rules (do not break)
 
 * **Never commit Microsoft VC++ runtime DLLs** (`app/Madeira/x86_64-vcruntime/*.dll`
@@ -111,8 +166,10 @@ is re-upstreaming them as `pr/fastsync-opt-in`, `pr/async-apc-requeue`,
   emulator). Fix Madeira-side bugs only; **do not help configure crack or
   Steam-emulator files** (e.g. `steam_api.ini`).
 * A GitHub PAT was once pasted in chat; the owner was told to revoke it. Never
-  use tokens from chat. A signing `.p12` (+password) and `.mobileprovision`
-  were shared read-only; never commit or use them.
+  use tokens from chat. The signing `.p12` (+password) and `.mobileprovision`
+  must never be committed or printed. Since 2026-09-30 (owner's decision) CI
+  uses them only from the private B2 bucket for OTA signing (section 2b);
+  agents do not handle the files themselves.
 
 ## 4. Ghost of Tsushima (D3D12, Nixxes port) -- PAUSED 2026-09-29
 
