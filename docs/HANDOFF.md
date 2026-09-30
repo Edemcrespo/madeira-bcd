@@ -682,7 +682,7 @@ tracked DLL and stay green).
   build and never lost the old ones; entries of earlier builds are removed
   once per build (log: `DXBC shader cache: removed N entries`).
 
-### Builds 228-233: God of War hangs at start (presents 0), 2026-09-29/30
+### Builds 228-234: God of War hangs at start (presents 0), 2026-09-29/30
 Tried and ruled out one by one on the device (each a separate build): madsync
 off, 125hz's early JIT pool (6c944a6: upstream's placement again),
 swap-min-kb, 125hz's decommit_pages (0046bce). Upstream's own build of the
@@ -702,7 +702,8 @@ same game was never tested here.
   HandleMemoryProtectionNotification holds it and logs `[iOS-xrem]` -> the
   log line grows FEX's heap (rpmalloc heap_get_page_generic) -> VirtualAlloc
   -> NotifyMemoryAlloc -> HandleMemoryProtectionNotification -> the same
-  lock. Build 233 (840d90f, tools/patch-fex-ios-intervals-reentry.py): the
+  lock. Build 234 (840d90f, tools/patch-fex-ios-intervals-reentry.py; run 233
+  was cancelled by mistake): the
   lock remembers its exclusive owner (TPIDRRO_EL0 on iOS); the memory
   notifications return at once on that thread and are counted
   (`[iv-reentry]` from HandleImageMap). Device test pending; then madsync and
