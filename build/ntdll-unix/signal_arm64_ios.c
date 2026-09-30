@@ -2623,6 +2623,51 @@ static void *ios_mach_exception_thread( void *arg )
                         }
                     }
 
+                    /* madeira-bcd: ALREADY BACKPATCHED BY A CONCURRENT FAULT.
+                     *
+                     * Two threads running the same block hit the same unaligned
+                     * LDAPR/STLR at once. This handler runs on the one Mach
+                     * exception-server thread, so it rewrites the instruction for
+                     * the first fault and then reads the SECOND thread's fault
+                     * with the plain LDR/STR (LDUR/STUR) already in place -- which
+                     * matches none of the atomic forms below, so the fault went out
+                     * as unhandled and the guest took an access violation on a
+                     * legal unaligned load. God of War's intro video decode threads
+                     * (build 239, logs 2026-09-30 10:49 / 10:51: `ldr x8,[x27,xzr]`,
+                     * `str xzr,[x6,xzr]` at kr=0x101, several threads, same pc).
+                     *
+                     * A plain LDR/STR cannot raise an alignment fault on normal
+                     * memory, so kr == EXC_ARM_DA_ALIGN with one of our rewritten
+                     * forms (and its half-barrier in the neighbouring slot) means the
+                     * fault came from the pre-patch instruction. Re-run it: at pc for
+                     * the loads (barrier after), at pc-4 for the stores (barrier
+                     * before). The patching fault already invalidated the icache. */
+                    if (fault_kr == 0x101 /* EXC_ARM_DA_ALIGN */)
+                    {
+                        uint32_t next_slot = __atomic_load_n((volatile uint32_t *)(rw_pc + 4), __ATOMIC_ACQUIRE);
+                        uint32_t prev_slot_now = __atomic_load_n((volatile uint32_t *)(rw_pc - 4), __ATOMIC_ACQUIRE);
+                        int resume = 0;   /* 1 = at pc, -4 = at pc-4 */
+                        if (((insn & LDAXR_MASK) == LDR_INST || (insn & RCPC2_MASK) == LDUR_INST) && next_slot == DMB_LD)
+                            resume = 1;
+                        else if (((insn & LDAXR_MASK) == STR_INST || (insn & RCPC2_MASK) == STUR_INST) && prev_slot_now == DMB)
+                            resume = -4;
+                        if (resume)
+                        {
+                            static volatile int rp_count;
+                            int n = __sync_add_and_fetch(&rp_count, 1);
+                            if (resume < 0)
+                                __darwin_arm_thread_state64_set_pc_fptr(state, (void *)(uintptr_t)(fault_pc - 4));
+                            if (n <= 16 || (n % 256) == 0)
+                                dprintf(STDERR_FILENO,
+                                        "[mach_exc] UNALIGNED-REPATCHED madeira-bcd #%d pc=0x%llx insn=0x%08x addr=0x%llx "
+                                        "-- rewritten by a concurrent fault, re-run%s\n",
+                                        n, (unsigned long long)fault_pc, insn, (unsigned long long)fault_addr,
+                                        resume < 0 ? " from the barrier" : "");
+                            handled = 1;
+                            goto skip_unaligned_backpatch;
+                        }
+                    }
+
                     if ((insn & LDAXR_MASK) == LDAR_INST ||
                         (insn & LDAXR_MASK) == LDAPR_INST)
                     {

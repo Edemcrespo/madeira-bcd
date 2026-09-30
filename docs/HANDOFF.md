@@ -770,6 +770,19 @@ same game was never tested here.
   239: tools/patch-fex-ios-ircap-tls.py makes it an atomic in the ARM64EC
   module as well. The other xtajit64 thread_local (AllocWatch's Anchor, +0x10)
   only has its address taken.
+* Build 239 on the device (logs 10:49, 10:50, 10:51): past the allocator
+  fault; Metal HUD up, the Sony Interactive Entertainment intro video plays
+  for about a second, then it stops. Two of three runs: the unaligned
+  backpatch race. Several video/decode threads run the same block; the Mach
+  exception server rewrites LDAPR/STLR -> LDR/STR (+ half-barrier) for the
+  first fault, then reads the next thread's (already queued) alignment fault
+  with the plain form in place, matches nothing and sends it on as unhandled
+  (`ldr x8,[x27,xzr]` / `str xzr,[x6,xzr]`, kr=0x101, same pc, x18 differs).
+  Build 240: kr == EXC_ARM_DA_ALIGN on a rewritten form whose barrier slot is
+  in place is re-run (pc for loads, pc-4 for stores) ([mach_exc]
+  UNALIGNED-REPATCHED). Third run: FEX native code with x18 = 0 read
+  TEB->TlsSlots[1] (addr 0x1488, pc libarm64ecfex+0x12f908) -- the iOS x18
+  problem in a TlsGetValue-style path; open.
 
 ### Build 226: first green IPA after the switch (2026-09-29, run 36595079405)
 Commit 17088ab (main fast-forwarded; the automatic main run 227 cancelled).
