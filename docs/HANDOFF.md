@@ -802,6 +802,16 @@ same game was never tested here.
   unbound slot = hint/name RVA 0x34f06. Build 242: a refused read-only restore
   inside a pool-copied image leaves the page as it is, reports success and
   lets the sync run ([vmem-denied] madeira-bcd: restore ... refused).
+* Build 241 on the device (logs 11:20, 11:21): the repatch works (16
+  [mach_exc] UNALIGNED-REPATCHED per run); one run got through the intro
+  videos (choppy) and stopped as the main menu appeared. Next fault, both
+  runs: `ldaddal w7, w8, [x6]` on 0x...b6267e (guest 0x1408df521, x86 lock
+  add/xadd on a misaligned dword), which only the LL/SC and CAS forms were
+  emulated for. Build 243: LSE atomics (LDADD/LDCLR/LDEOR/LDSET/LD{S,U}{MAX,MIN}
+  and SWP, any A/L) on a misaligned operand are emulated on the exception
+  server like CAS ([mach_exc] UNALIGNED-LSE). The owner's madeira.cfg still has
+  inproc-sync = 0 from the hang hunt (madsync off), a likely part of the
+  choppiness.
 
 ### Build 226: first green IPA after the switch (2026-09-29, run 36595079405)
 Commit 17088ab (main fast-forwarded; the automatic main run 227 cancelled).

@@ -2879,6 +2879,78 @@ static void *ios_mach_exception_thread( void *arg )
                         }
                     }
 
+                    /* madeira-bcd: misaligned LSE atomic memory operations.
+                     *
+                     * x86 `lock add/xadd/and/or/xor/xchg` on a misaligned operand is
+                     * legal and FEX lowers it to LDADD/LDCLR/LDEOR/LDSET/SWP (with
+                     * A/L), which alignment-fault here like CAS does. God of War on
+                     * build 241 (logs 2026-09-30 11:20 and 11:21): `ldaddal w7, w8,
+                     * [x6]` on 0x...b6267e, guest 0x1408df521, the frame after the
+                     * intro videos. Emulated like the CAS above: read, compute,
+                     * write through mach_vm on the single exception-server thread,
+                     * old value to Rt, pc + 4. Never patched: the same instruction
+                     * also serves aligned operands. LDAPR shares the family bits
+                     * (o3=1, opc=100) and is left to the backpatch above. */
+                    else if (!handled && (insn & 0x3F200C00u) == 0x38200000u &&
+                             (((insn >> 15) & 1) == 0 || ((insn >> 12) & 7) == 0))
+                    {
+                        uint32_t Size = (insn >> 30) & 0x3;
+                        uint32_t Rs = (insn >> 16) & 0x1F;
+                        uint32_t Rn = (insn >> 5) & 0x1F;
+                        uint32_t Rt = insn & 0x1F;
+                        uint32_t o3 = (insn >> 15) & 1;
+                        uint32_t opc = (insn >> 12) & 7;
+                        uint32_t nbytes = 1u << Size;
+                        uint64_t addr = (Rn == 31) ? __darwin_arm_thread_state64_get_sp(state)
+                                                   : state.__x[Rn];
+                        uint64_t szmask = (Size == 3) ? ~0ULL : ((1ULL << (8u << Size)) - 1);
+                        uint64_t sbit = 1ULL << ((8u << Size) - 1);
+                        uint64_t opnd = ((Rs == 31) ? 0 : state.__x[Rs]) & szmask;
+                        uint64_t cur = 0, nv = 0;
+                        mach_vm_size_t got = 0;
+                        if (mach_vm_read_overwrite( mach_task_self(), addr, nbytes,
+                                                    (mach_vm_address_t)&cur, &got ) == KERN_SUCCESS
+                            && got == nbytes)
+                        {
+                            int64_t sc, so;
+                            cur &= szmask;
+                            sc = (int64_t)((cur ^ sbit) - sbit);
+                            so = (int64_t)((opnd ^ sbit) - sbit);
+                            if (o3) nv = opnd;                                   /* SWP */
+                            else switch (opc)
+                            {
+                            case 0: nv = cur + opnd; break;                      /* LDADD */
+                            case 1: nv = cur & ~opnd; break;                     /* LDCLR */
+                            case 2: nv = cur ^ opnd; break;                      /* LDEOR */
+                            case 3: nv = cur | opnd; break;                      /* LDSET */
+                            case 4: nv = (sc > so) ? cur : opnd; break;          /* LDSMAX */
+                            case 5: nv = (sc < so) ? cur : opnd; break;          /* LDSMIN */
+                            case 6: nv = (cur > opnd) ? cur : opnd; break;       /* LDUMAX */
+                            default: nv = (cur < opnd) ? cur : opnd; break;      /* LDUMIN */
+                            }
+                            nv &= szmask;
+                            if (mach_vm_write( mach_task_self(), addr, (vm_offset_t)(uintptr_t)&nv,
+                                               nbytes ) != KERN_SUCCESS)
+                                goto skip_unaligned_backpatch;  /* write failed: honest AV path */
+                            if (Rt != 31) state.__x[Rt] = cur;
+                            __darwin_arm_thread_state64_set_pc_fptr(
+                                state, (void *)(uintptr_t)(fault_pc + 4));
+                            {
+                                static volatile int lse_count;
+                                int n = __sync_add_and_fetch(&lse_count, 1);
+                                if (n <= 8 || (n % 256) == 0)
+                                    dprintf(STDERR_FILENO,
+                                            "[mach_exc] UNALIGNED-LSE madeira-bcd #%d %s pc=0x%llx addr=0x%llx "
+                                            "size=%u old=0x%llx new=0x%llx\n",
+                                            n, o3 ? "SWP" : (const char *[]){"LDADD","LDCLR","LDEOR","LDSET",
+                                                                              "LDSMAX","LDSMIN","LDUMAX","LDUMIN"}[opc],
+                                            (unsigned long long)fault_pc, (unsigned long long)addr, nbytes,
+                                            (unsigned long long)cur, (unsigned long long)nv);
+                            }
+                            handled = 1;
+                        }
+                    }
+
                     if (patched)
                     {
                         if (adjust_pc)
