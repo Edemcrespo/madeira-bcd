@@ -114,14 +114,20 @@ fi
 #  - patch-fex-ios-mapview-selfshared.py: NotifyMapViewOfSection must not take
 #    CodeInvalidationMutex exclusively on a thread that holds it shared (God of
 #    War waited on itself inside LdrLoadDll, builds 226-230).
+#  - patch-fex-ios-intervals-reentry.py: a memory notification raised by an
+#    allocation made under InvalidationTracker's IntervalsLock (a log line
+#    growing FEX's heap) must not wait on its own thread (God of War, builds
+#    230-231: HandleMemoryProtectionNotification -> EFmt -> rpmalloc ->
+#    VirtualAlloc -> NotifyMemoryAlloc -> the same lock).
 #  - patch-fex-ios-avx.py: AVX/AVX2 only when MADEIRA_FEX_AVX=1 at launch, so
 #    the same module serves both; xtajit64-avx.dll is kept as a copy for the
 #    bridge's existing switch.
-echo "=== with the map-notification fix and the AVX opt-in ==="
+echo "=== with the map-notification and IntervalsLock fixes and the AVX opt-in ==="
 python3 "$R/tools/patch-fex-ios-mapview-selfshared.py" "$R/FEX/Source/Windows/ARM64EC/Module.cpp"
+python3 "$R/tools/patch-fex-ios-intervals-reentry.py" "$R/FEX/Source/Windows/Common"
 python3 "$R/tools/patch-fex-ios-avx.py" "$R/FEX/$CPUF"
 build
-git -C FEX checkout -- "$CPUF" Source/Windows/ARM64EC/Module.cpp
+git -C FEX checkout -- "$CPUF" Source/Windows/ARM64EC/Module.cpp Source/Windows/Common/InvalidationTracker.h Source/Windows/Common/InvalidationTracker.cpp
 cp "$B/Bin/libarm64ecfex.dll" "$SHIP"
 cp "$B/Bin/libarm64ecfex.dll" "$AVX"
-echo "::notice::xtajit64.dll (and xtajit64-avx.dll) built from FEX $(git -C FEX rev-parse --short HEAD) with the map-notification self-deadlock fix and the MADEIRA_FEX_AVX opt-in, and shipped"
+echo "::notice::xtajit64.dll (and xtajit64-avx.dll) built from FEX $(git -C FEX rev-parse --short HEAD) with the map-notification and IntervalsLock self-deadlock fixes and the MADEIRA_FEX_AVX opt-in, and shipped"
