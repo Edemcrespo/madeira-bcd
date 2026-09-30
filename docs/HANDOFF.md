@@ -744,6 +744,20 @@ same game was never tested here.
   would do that). Other changes vs the template: +0x28 = 0x14506ce60,
   +0x58 low dword 0x80000000 -> 0x80000005. Finding the writers needs the
   code: GoW.exe itself (the owner's copy, analysis only, never committed).
+* GoW.exe (owner's copy, kept out of the repo) disassembled: the allocator
+  stack is push `idx = movsxd [tls+0xc]; [tls+0xc] = idx+1;
+  [tls+0xf0 + 8*idx + 8] = heap` (14 inlined sites, e.g. 0x14040a8f0),
+  pop `[tls+0xc] = idx-1`, and one restore (0x14040b2f0) that zeroes the
+  table above the restored count; nothing else stores into the table. The
+  memory init at 0x14040a8a3 pushes heap A (an object in .data at
+  0x1426d18b0 + n*0x238, never NULL) right after the 1368 MB VirtualAlloc,
+  then the 1026 MB arena (0x14040aa2f -> 0x1404ad5c0), then pops once. The
+  observed state (index 0, table[0] 0, table[1] arena) is what you get if the
+  first push, the one with index -1, never reached table[0]. No module has an
+  unslotted static TLS (checked every DLL the log loads). Build 238 prints
+  the stack at each of the first four jumbo reservations ([jumbo-tls]):
+  jumbo#1 is heap A's VirtualAlloc (before the push), jumbo#2 the arena
+  (after it).
 
 ### Build 226: first green IPA after the switch (2026-09-29, run 36595079405)
 Commit 17088ab (main fast-forwarded; the automatic main run 227 cancelled).
