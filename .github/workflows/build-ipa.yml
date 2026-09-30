@@ -628,7 +628,7 @@ jobs:
           path: FEX/build-arm64ec
           key: fex-arm64ec-${{ steps.fexrev.outputs.sha }}-v2
 
-      - name: Build xtajit64.dll (map-notification + IntervalsLock fixes, AVX opt-in)
+      - name: Build xtajit64.dll (FEX fixes, AVX opt-in)
         if: env.MINGW_OK == '1'
         continue-on-error: true
         run: bash tools/build-xtajit64.sh
@@ -639,6 +639,28 @@ jobs:
         with:
           path: FEX/build-arm64ec
           key: fex-arm64ec-${{ steps.fexrev.outputs.sha }}-v2
+
+      # madeira-bcd: FEX's aarch64 WOW64 module (xtajit.dll, the 32-bit CPU
+      # backend) was only ever built by hand (build/fex-wow64/build.sh). Built
+      # here with the CPUID index fix; on failure the committed module stays.
+      - name: Restore FEX WOW64 build
+        id: fexwowcache
+        uses: actions/cache/restore@v4
+        with:
+          path: FEX/build-wow64
+          key: fex-wow64-${{ steps.fexrev.outputs.sha }}-v1
+
+      - name: Build xtajit.dll (WOW64, CPUID index fix)
+        if: env.MINGW_OK == '1'
+        continue-on-error: true
+        run: bash tools/build-xtajit-wow64.sh
+
+      - name: Save FEX WOW64 build
+        if: steps.fexwowcache.outputs.cache-hit != 'true' && hashFiles('FEX/build-wow64/Bin/libwow64fex.dll') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: FEX/build-wow64
+          key: fex-wow64-${{ steps.fexrev.outputs.sha }}-v1
 
       - name: Restore LLVM 15.0.7 iOS build
         id: llvmcache

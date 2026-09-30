@@ -819,6 +819,18 @@ same game was never tested here.
   file-backed). The pre-switch runs sat at the same edge (peaks 7687 and
   7984 MB) and survived. Next: memory pool (mempool-mb, upstream's
   MadeiraMemoryHost) and/or swap coverage "wide", one at a time.
+* 32-bit Crysis on build 243 (log 11:57): the IAT fix works (wow64.dll,
+  libwow64fex, ucrtbase, kernel32, kernelbase all bind; 20+ `[vmem-denied]
+  madeira-bcd: restore ... refused` lines), wow64 initialises and the game's
+  own code runs (creates C:\users\...\My Games\Crysis, LogBackups). Then
+  CPUID 0x80000002: FEX's Function_8000_0002h indexes PerCPUData with the raw
+  host CPU number (1 entry on iOS, CPU 3+) and strlen()s a garbage pointer
+  (0xfff68000; pc ntdll strlen, lr xtajit.dll Function_8000_0002h+0x30).
+  RunFunctionName wraps the index, the leaf entry points did not. Build 244:
+  tools/patch-fex-ios-cpuid-index.py for both modules; the WOW64 module
+  (xtajit.dll, until now built by hand with build/fex-wow64/build.sh) is now
+  built in CI by tools/build-xtajit-wow64.sh (cached FEX/build-wow64; the
+  committed module stays if the build fails or its exports differ).
 
 ### Build 226: first green IPA after the switch (2026-09-29, run 36595079405)
 Commit 17088ab (main fast-forwarded; the automatic main run 227 cancelled).
