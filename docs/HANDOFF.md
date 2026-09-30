@@ -80,6 +80,11 @@ makes, with the reason and the evidence), `docs/WOW64.md`, `docs/BUILDING.md`.
     rest), with real C prototypes so the arm64ec entry thunks pass arguments.
     Checked locally: the generated C compiles for arm64ec. Open: device test;
     if it still dies, look for the next NULL call in the same place.
+  - **Build 258 green** (run 36739501697, head ab18526, main fast-forwarded):
+    "vulkan-1.dll stand-in built (262 exports) and shipped"; OTA notice
+    "Madeira 0.1.258 signed ... kurulum-0.1.258.html written to the private
+    bucket (links valid until 2026-10-07 16:07 UTC)". Waiting on the owner's
+    Crysis Remastered retry log.
 
 ---
 
