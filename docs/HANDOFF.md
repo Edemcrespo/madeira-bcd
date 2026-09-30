@@ -812,6 +812,13 @@ same game was never tested here.
   server like CAS ([mach_exc] UNALIGNED-LSE). The owner's madeira.cfg still has
   inproc-sync = 0 from the hang hunt (madsync off), a likely part of the
   choppiness.
+* Build 243 (log 11:55, madsync back on): no unhandled fault at all; 11
+  [mach_exc] UNALIGNED-LSE (ldaddal) and 16 UNALIGNED-REPATCHED handled. The
+  game ran 55 s and was killed by jetsam: footprint 8178 of 8192 MB
+  (internal ~3.0 GB, compressed ~3.3 GB, external ~0.55 GB, swap tier 2.1 GB
+  file-backed). The pre-switch runs sat at the same edge (peaks 7687 and
+  7984 MB) and survived. Next: memory pool (mempool-mb, upstream's
+  MadeiraMemoryHost) and/or swap coverage "wide", one at a time.
 
 ### Build 226: first green IPA after the switch (2026-09-29, run 36595079405)
 Commit 17088ab (main fast-forwarded; the automatic main run 227 cancelled).
