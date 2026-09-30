@@ -165,6 +165,12 @@ makes, with the reason and the evidence), `docs/WOW64.md`, `docs/BUILDING.md`.
     fxc.exe) and logs `[session-log] ... Steam game <exe>: logs/...`.
     Unit-tested on Linux in isolation (link made, fxc/duplicate/system exe
     skipped); ntdll-unix build on CI is the real check.
+  - Owner asked (2026-09-30 night, B2 web keeps logging out) for the install
+    links in chat until the mail is set up. Not possible by design: agents hold
+    no B2 credentials (the key lives only in GitHub secrets; the one pasted in
+    chat must not be used), and CI cannot hand the link over through the public
+    Actions log. Pointed the owner to setting up the OTA_MAIL_* secrets from the
+    phone (app password page + GitHub website in Safari) instead.
 
 ---
 
